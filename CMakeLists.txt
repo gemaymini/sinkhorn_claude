@@ -24,6 +24,9 @@ set(ACL_LIB_DIR "$ENV{ASCEND_HOME_PATH}/lib64")
 set(SN_KERNEL_VARIANT  1  CACHE STRING "0=original per-matrix kernel, 1=S1 batched")
 set(SN_TILE_TARGET     64 CACHE STRING "target matrices per core")
 set(SN_S1_COPYOUT_MODE 0  CACHE STRING "0=bulk DataCopyPad, 1=per-row fallback")
+set(SN_S1_DIV_MODE     0  CACHE STRING "0=Reciprocal+NR+Mul, 1=Div")
+set(SN_S1_NR_STEPS     2  CACHE STRING "Newton-Raphson steps for reciprocal")
+set(SN_S1_USE_MAX      1  CACHE STRING "1=subtract row max in softmax")
 set(SN_TILING_MODE     1  CACHE STRING "tiling upload: 0=per-call memcpy, 1=cached")
 set(SN_CORE_QUERY      1  CACHE STRING "core count query: 0=per-call, 1=cached")
 
@@ -37,9 +40,12 @@ set(SN_COMMON_DEFS
     SN_KERNEL_VARIANT=${SN_KERNEL_VARIANT}
     SN_TILE_TARGET=${SN_TILE_TARGET}
     SN_S1_COPYOUT_MODE=${SN_S1_COPYOUT_MODE}
+    SN_S1_DIV_MODE=${SN_S1_DIV_MODE}
+    SN_S1_NR_STEPS=${SN_S1_NR_STEPS}
+    SN_S1_USE_MAX=${SN_S1_USE_MAX}
 )
 message(STATUS "SN_KERNEL_VARIANT=${SN_KERNEL_VARIANT} (${SN_KERNEL_SRC})")
-message(STATUS "SN_TILE_TARGET=${SN_TILE_TARGET}  SN_S1_COPYOUT_MODE=${SN_S1_COPYOUT_MODE}")
+message(STATUS "SN_TILE_TARGET=${SN_TILE_TARGET}  COPYOUT=${SN_S1_COPYOUT_MODE}  DIV_MODE=${SN_S1_DIV_MODE}  NR=${SN_S1_NR_STEPS}  USE_MAX=${SN_S1_USE_MAX}")
 message(STATUS "SN_TILING_MODE=${SN_TILING_MODE}  SN_CORE_QUERY=${SN_CORE_QUERY}")
 
 # ============================================================================
