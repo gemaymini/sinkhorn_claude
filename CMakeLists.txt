@@ -16,6 +16,7 @@ set(ACL_LIB_DIR "$ENV{ASCEND_HOME_PATH}/lib64")
 # ============================================================================
 # 编译期开关（A/B 与逐基因消融用）
 # ============================================================================
+# 默认值 = 实测最优配置 s1d_arith（v1=158.55us，官方口径 9.86x）
 #   SN_KERNEL_VARIANT   0 = 原 per-matrix kernel   1 = S1 padded-AoS 批量（默认）
 #   SN_TILE_TARGET      每核期望处理的矩阵数，反推核数
 #   SN_S1_COPYOUT_MODE  0 = 单次批量 DataCopyPad（默认）  1 = 每行一次（保守回退）
@@ -24,11 +25,11 @@ set(ACL_LIB_DIR "$ENV{ASCEND_HOME_PATH}/lib64")
 set(SN_KERNEL_VARIANT  1  CACHE STRING "0=original per-matrix kernel, 1=S1 batched")
 set(SN_TILE_TARGET     64 CACHE STRING "target matrices per core")
 set(SN_S1_COPYOUT_MODE 0  CACHE STRING "0=bulk DataCopyPad, 1=per-row fallback")
-set(SN_S1_DIV_MODE     0  CACHE STRING "0=Reciprocal+NR+Mul, 1=Div")
+set(SN_S1_DIV_MODE     1  CACHE STRING "0=Reciprocal+NR+Mul, 1=Div")
 set(SN_S1_NR_STEPS     2  CACHE STRING "Newton-Raphson steps for reciprocal")
 set(SN_S1_USE_MAX      1  CACHE STRING "1=subtract row max in softmax")
 set(SN_S1_COLNORM_WIDE 1  CACHE STRING "0=1 matrix/repeat, 1=8 matrices/repeat")
-set(SN_S1_BARRIER_MODE 0  CACHE STRING "0=barrier after every vector op, 1=none")
+set(SN_S1_BARRIER_MODE 1  CACHE STRING "0=barrier after every vector op, 1=none")
 set(SN_S1_DIAG         0  CACHE STRING "0=normal, 1=copy-in/out only, 2=skip BuildEpsVector")
 set(SN_S1_EPS_MODE     1  CACHE STRING "0=eps vector from GM, 1=arithmetic (no GM)")
 set(SN_TILING_MODE     1  CACHE STRING "tiling upload: 0=per-call memcpy, 1=cached")

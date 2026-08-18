@@ -57,7 +57,11 @@ def mock_eval(g, rng):
     # 标定到 s1d_arith 的真机 v1=158.55us
     v1 = (m1 + 62.0) * (1.0 + rng.gauss(0, 0.015))
 
-    if g["div_mode"] == 0 and g["nr_steps"] == 0:
+    # 精度门禁含 randn×32 用例：免减 max 时 exp(112)≈4e48 会溢出成 inf，
+    # 进而产生 NaN。真机上这一档必挂，mock 必须如实反映，否则搜索会被误导。
+    if g["use_max"] == 0:
+        headroom = 9.9
+    elif g["div_mode"] == 0 and g["nr_steps"] == 0:
         headroom = 0.133                        # 硬件 Reciprocal 只有 9 位
     elif g["div_mode"] == 0 and g["nr_steps"] == 1:
         headroom = 0.005
