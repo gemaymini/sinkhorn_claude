@@ -16,6 +16,17 @@ constexpr uint32_t SN_PAD_MAT = 32;         // UB 中每矩阵 32 个 float（4 
 constexpr uint32_t SN_REPEAT = 10;
 constexpr float SN_EPS = 1e-6f;
 
+// ---- 原 per-matrix kernel (SN_KERNEL_VARIANT=0) 的 UB 常量 ----
+// S1 不使用这些，但对照组 sinkhorn_normalize_kernel.asc 需要
+constexpr uint32_t SN_PADDED_SIZE = 32;   // 每矩阵补齐后 32 个 float
+constexpr uint32_t SN_UB_IN = 32;
+constexpr uint32_t SN_UB_OUT = 32;
+constexpr uint32_t SN_UB_WORK = 64;
+constexpr uint32_t SN_UB_REDUCE = 32;
+constexpr uint32_t SN_UB_BCAST = 32;
+constexpr uint32_t SN_UB_TRANS = 32;
+constexpr uint32_t SN_UB_TMP = 32;
+
 // ---- S1 常量 ----
 // 单个 tile 最多处理多少矩阵。上限来自 AscendC level-0 API 的 repeatTimes 是 uint8 (<=255)，
 // ColNormalize 里的 Add/Mul 用 repeatTimes = matsPerTile。

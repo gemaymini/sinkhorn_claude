@@ -38,6 +38,16 @@
 #ifndef SN_TILE_TARGET
 #define SN_TILE_TARGET 64
 #endif
+#ifndef SN_KERNEL_VARIANT
+#define SN_KERNEL_VARIANT 1
+#endif
+// 对照组 v0 是 per-matrix kernel，原本就用满核；若也按 SN_TILE_TARGET 限核会让 A/B 失真。
+// tileTarget=1 时 SinkhornComputeTiling 会退化成"能用多少核用多少核"，与原实现完全一致。
+#if SN_KERNEL_VARIANT == 1
+#define SN_EFFECTIVE_TILE_TARGET (SN_TILE_TARGET)
+#else
+#define SN_EFFECTIVE_TILE_TARGET 1u
+#endif
 
 extern "C" void sinkhorn_normalize_kernel(uint32_t blockDim, void *l2Ctrl, aclrtStream stream,
                                            uint8_t *x, uint8_t *y, uint8_t *tiling);
@@ -94,7 +104,7 @@ TilingCache &GetTilingCache()
 void FillTiling(SinkhornTilingData &t, uint32_t totalMats, uint32_t repeat, float eps)
 {
     SinkhornComputeTiling(t, totalMats, repeat, eps,
-                          static_cast<uint32_t>(GetVectorCoreNum()), SN_TILE_TARGET);
+                          static_cast<uint32_t>(GetVectorCoreNum()), SN_EFFECTIVE_TILE_TARGET);
 }
 
 } // namespace
