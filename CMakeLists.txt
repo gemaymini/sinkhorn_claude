@@ -29,6 +29,7 @@ set(SN_S1_NR_STEPS     2  CACHE STRING "Newton-Raphson steps for reciprocal")
 set(SN_S1_USE_MAX      1  CACHE STRING "1=subtract row max in softmax")
 set(SN_S1_COLNORM_WIDE 1  CACHE STRING "0=1 matrix/repeat, 1=8 matrices/repeat")
 set(SN_S1_BARRIER_MODE 0  CACHE STRING "0=barrier after every vector op, 1=none")
+set(SN_S1_DIAG         0  CACHE STRING "0=normal, 1=copy-in/out only, 2=skip BuildEpsVector")
 set(SN_TILING_MODE     1  CACHE STRING "tiling upload: 0=per-call memcpy, 1=cached")
 set(SN_CORE_QUERY      1  CACHE STRING "core count query: 0=per-call, 1=cached")
 
@@ -47,9 +48,10 @@ set(SN_COMMON_DEFS
     SN_S1_USE_MAX=${SN_S1_USE_MAX}
     SN_S1_COLNORM_WIDE=${SN_S1_COLNORM_WIDE}
     SN_S1_BARRIER_MODE=${SN_S1_BARRIER_MODE}
+    SN_S1_DIAG=${SN_S1_DIAG}
 )
 message(STATUS "SN_KERNEL_VARIANT=${SN_KERNEL_VARIANT} (${SN_KERNEL_SRC})")
-message(STATUS "SN_TILE_TARGET=${SN_TILE_TARGET}  COPYOUT=${SN_S1_COPYOUT_MODE}  DIV_MODE=${SN_S1_DIV_MODE}  NR=${SN_S1_NR_STEPS}  USE_MAX=${SN_S1_USE_MAX}  COLWIDE=${SN_S1_COLNORM_WIDE}  BARRIER=${SN_S1_BARRIER_MODE}")
+message(STATUS "SN_TILE_TARGET=${SN_TILE_TARGET}  COPYOUT=${SN_S1_COPYOUT_MODE}  DIV_MODE=${SN_S1_DIV_MODE}  NR=${SN_S1_NR_STEPS}  USE_MAX=${SN_S1_USE_MAX}  COLWIDE=${SN_S1_COLNORM_WIDE}  BARRIER=${SN_S1_BARRIER_MODE}  DIAG=${SN_S1_DIAG}")
 message(STATUS "SN_TILING_MODE=${SN_TILING_MODE}  SN_CORE_QUERY=${SN_CORE_QUERY}")
 
 # ============================================================================

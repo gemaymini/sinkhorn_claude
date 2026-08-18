@@ -20,11 +20,13 @@ cd "${ROOT}"
 SKIP_BUILD=0
 TILE=64
 ONLY=""
+SWEEP=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-build) SKIP_BUILD=1 ;;
         --tile) shift; TILE="$1" ;;
         --only) shift; ONLY="$1" ;;
+        --sweep) SWEEP=1 ;;
     esac
     shift
 done
@@ -40,12 +42,41 @@ hr() { printf '%.0s=' {1..78}; echo; }
 
 # 名字 | cmake 选项
 VARIANTS=(
-  "s1b_div|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1 -DSN_S1_BARRIER_MODE=0"
-  "s1c_nobar|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1 -DSN_S1_BARRIER_MODE=1"
-  "s1c_narrow|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=0 -DSN_S1_BARRIER_MODE=1"
+  "s1c|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1 -DSN_S1_BARRIER_MODE=1"
+  "diag_copyonly|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1 -DSN_S1_BARRIER_MODE=1 -DSN_S1_DIAG=1"
+  "diag_noeps|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1 -DSN_S1_BARRIER_MODE=1 -DSN_S1_DIAG=2"
 )
 
 selected() { [ -z "${ONLY}" ] && return 0; case ",${ONLY}," in *",$1,"*) return 0 ;; esac; return 1; }
+
+
+# ---------------------------------------------------------------------------
+# tile 扫描：固定开销是否随「每核矩阵数」缩放？
+#   每核矩阵数 n 决定 CopyIn/CopyOut/BuildEpsVector 的 MTE 描述符数（约 3n 个 16B 块），
+#   同时决定用多少核（1024/n）。
+#   随 n 减小而变快  => MTE 描述符是瓶颈，应继续减小 tile / 改布局减少描述符
+#   基本不随 n 变化  => launch/dispatch 是瓶颈，kernel 里再优化都没用
+# ---------------------------------------------------------------------------
+if [ ${SWEEP} -eq 1 ]; then
+    hr; echo "tile 扫描（配置 = 当前最好的 s1c）"; hr
+    OPTS="-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1 -DSN_S1_BARRIER_MODE=1"
+    printf "%-8s %-10s %-14s %-12s %s\n" "tile" "核数" "MTE块数/核" "M1 (us)" "固定开销 a (us)"
+    printf -- "----------------------------------------------------------------------\n"
+    for t in 8 16 32 64 128; do
+        d="build_sweep_${t}"
+        # shellcheck disable=SC2086
+        sn_configure "${d}" ${OPTS} -DSN_TILE_TARGET="${t}" >/dev/null 2>&1 || { echo "配置失败 tile=${t}"; continue; }
+        sn_build "${d}" sinkhorn_normalize_ops >/dev/null 2>&1 || { echo "编译失败 tile=${t}"; continue; }
+        m1=$(${PY} scripts/p0_host_breakdown.py --so "${ROOT}/${d}/${SO}" --repeat-torch 20 2>/dev/null \
+             | awk '/M1  裸算子调用/ {print $NF}')
+        a=$(${PY} scripts/s1_scaling.py --so "${ROOT}/${d}/${SO}" --iters 200 2>/dev/null \
+             | awk '/每 tile 固定开销/ {print $(NF-2)}')
+        cores=$(( (1024 + t - 1) / t ))
+        printf "%-8s %-10s %-14s %-12s %s\n" "${t}" "${cores}" "$((3*t*4))" "${m1:-?}" "${a:-?}"
+    done
+    hr
+    exit 0
+fi
 
 if [ ${SKIP_BUILD} -eq 0 ]; then
     hr; echo "编译变体（SN_TILE_TARGET=${TILE}）"; hr
@@ -68,11 +99,14 @@ for v in "${VARIANTS[@]}"; do
     [ -f "build_${name}/${SO}" ] || continue
     echo
     echo "######## ${name} ########"
-    if ${PY} scripts/check_shapes.py --so "${ROOT}/build_${name}/${SO}" --seeds 5; then
-        PREC[${name}]=pass
-    else
-        PREC[${name}]=fail
-    fi
+    case "${name}" in
+        diag_*) echo "  诊断变体，结果不正确，跳过精度门禁"; PREC[${name}]=diag ;;
+        *) if ${PY} scripts/check_shapes.py --so "${ROOT}/build_${name}/${SO}" --seeds 5; then
+               PREC[${name}]=pass
+           else
+               PREC[${name}]=fail
+           fi ;;
+    esac
 done
 
 hr; echo "第 2 步：时间拆解（只测精度通过的变体）"; hr
@@ -80,7 +114,7 @@ for v in "${VARIANTS[@]}"; do
     name="${v%%|*}"
     selected "${name}" || continue
     [ -f "build_${name}/${SO}" ] || continue
-    if [ "${PREC[${name}]:-fail}" != "pass" ] && [ "${name}" != "s1_base" ]; then
+    if [ "${PREC[${name}]:-fail}" = "fail" ]; then
         echo; echo "######## ${name}: 精度未通过，跳过计时 ########"
         continue
     fi
@@ -107,7 +141,7 @@ hr; echo "第 4 步：迭代次数扫描（拆出每 tile 固定开销 vs 每次
 for v in "${VARIANTS[@]}"; do
     name="${v%%|*}"
     selected "${name}" || continue
-    [ "${PREC[${name}]:-fail}" = "pass" ] || continue
+    [ "${PREC[${name}]:-fail}" = "fail" ] && continue
     echo
     echo "######## ${name} ########"
     ${PY} scripts/s1_scaling.py --so "${ROOT}/build_${name}/${SO}" | tail -16
