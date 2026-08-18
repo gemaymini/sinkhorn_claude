@@ -40,10 +40,9 @@ hr() { printf '%.0s=' {1..78}; echo; }
 
 # 名字 | cmake 选项
 VARIANTS=(
-  "v0|-DSN_KERNEL_VARIANT=0"
-  "s1_div|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=0"
-  "s1b_div|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1"
-  "s1b_nr|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=0 -DSN_S1_NR_STEPS=2 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1"
+  "s1b_div|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1 -DSN_S1_BARRIER_MODE=0"
+  "s1c_nobar|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1 -DSN_S1_BARRIER_MODE=1"
+  "s1c_narrow|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=0 -DSN_S1_BARRIER_MODE=1"
 )
 
 selected() { [ -z "${ONLY}" ] && return 0; case ",${ONLY}," in *",$1,"*) return 0 ;; esac; return 1; }
@@ -102,6 +101,16 @@ for v in "${VARIANTS[@]}"; do
     SINKHORN_OPS_SO="${ROOT}/build_${name}/${SO}" ${PY} scripts/bench_official.py \
         --module submission/model_new.py --device npu --mode both \
         | grep -E "裕度占用|Speedup|interleaved|official|反 fallback"
+done
+
+hr; echo "第 4 步：迭代次数扫描（拆出每 tile 固定开销 vs 每次迭代开销）"; hr
+for v in "${VARIANTS[@]}"; do
+    name="${v%%|*}"
+    selected "${name}" || continue
+    [ "${PREC[${name}]:-fail}" = "pass" ] || continue
+    echo
+    echo "######## ${name} ########"
+    ${PY} scripts/s1_scaling.py --so "${ROOT}/build_${name}/${SO}" | tail -16
 done
 
 hr
