@@ -18,7 +18,7 @@ NAMES = [
 UNSET = -999.0
 
 
-def fmt(a, n=32, per=8):
+def fmt(a, n=64, per=8):
     out = []
     for i in range(0, min(n, len(a)), per):
         chunk = " ".join(

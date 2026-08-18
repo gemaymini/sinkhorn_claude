@@ -34,6 +34,10 @@
 #ifndef SN_CORE_QUERY
 #define SN_CORE_QUERY 1
 #endif
+// 每核期望处理的矩阵数（S1 的核心调优旋钮之一）
+#ifndef SN_TILE_TARGET
+#define SN_TILE_TARGET 64
+#endif
 
 extern "C" void sinkhorn_normalize_kernel(uint32_t blockDim, void *l2Ctrl, aclrtStream stream,
                                            uint8_t *x, uint8_t *y, uint8_t *tiling);
@@ -74,7 +78,9 @@ struct TilingCache {
     uint32_t totalMats = 0;
     uint32_t repeat = 0;
     float eps = 0.0f;
-    SinkhornTilingData host{};
+    SinkhornTilingData meta{};
+    // 结构体 + 尾部 eps 数组，一起上传
+    alignas(32) uint8_t host[SN_TILING_BYTES]{};
     void *dev = nullptr;          // aclrtMalloc 一次，进程生命周期内复用
 };
 
@@ -87,19 +93,8 @@ TilingCache &GetTilingCache()
 
 void FillTiling(SinkhornTilingData &t, uint32_t totalMats, uint32_t repeat, float eps)
 {
-    uint32_t usedCores = static_cast<uint32_t>(GetVectorCoreNum());
-    if (usedCores > totalMats) usedCores = totalMats;
-    if (usedCores == 0) usedCores = 1;
-    uint32_t matPerCore = (totalMats + usedCores - 1) / usedCores;
-    uint32_t blockNum = (totalMats + matPerCore - 1) / matPerCore;
-    matPerCore = (totalMats + blockNum - 1) / blockNum;
-
-    t.blockNum = blockNum;
-    t.totalMats = totalMats;
-    t.matPerCore = matPerCore;
-    t.tailMatLastCore = totalMats - matPerCore * (blockNum - 1);
-    t.repeat = repeat;
-    t.eps = eps;
+    SinkhornComputeTiling(t, totalMats, repeat, eps,
+                          static_cast<uint32_t>(GetVectorCoreNum()), SN_TILE_TARGET);
 }
 
 } // namespace
@@ -133,30 +128,33 @@ at::Tensor sinkhorn_normalize_torch(const at::Tensor& x, int64_t repeat, double 
     // ---- 缓存路径：稳态零拷贝、零分配 ----
     TilingCache &c = GetTilingCache();
     if (!c.valid || c.totalMats != nMats || c.repeat != nRepeat || c.eps != fEps) {
-        FillTiling(c.host, nMats, nRepeat, fEps);
+        FillTiling(c.meta, nMats, nRepeat, fEps);
+        SinkhornFillTilingBuffer(c.host, c.meta);
         if (c.dev == nullptr) {
-            auto ret = aclrtMalloc(&c.dev, sizeof(SinkhornTilingData), ACL_MEM_MALLOC_HUGE_FIRST);
+            auto ret = aclrtMalloc(&c.dev, SN_TILING_BYTES, ACL_MEM_MALLOC_HUGE_FIRST);
             TORCH_CHECK(ret == ACL_SUCCESS && c.dev != nullptr, "aclrtMalloc for tiling failed");
         }
         // 只在缓存未命中时发生（基准测试中仅第一次），用同步拷贝以保证 host 缓冲区安全。
-        auto ret = aclrtMemcpy(c.dev, sizeof(SinkhornTilingData), &c.host,
-                               sizeof(SinkhornTilingData), ACL_MEMCPY_HOST_TO_DEVICE);
+        auto ret = aclrtMemcpy(c.dev, SN_TILING_BYTES, c.host,
+                               SN_TILING_BYTES, ACL_MEMCPY_HOST_TO_DEVICE);
         TORCH_CHECK(ret == ACL_SUCCESS, "aclrtMemcpy for tiling failed");
         c.totalMats = nMats;
         c.repeat = nRepeat;
         c.eps = fEps;
         c.valid = true;
     }
-    const uint32_t blockDim = c.host.blockNum;
+    const uint32_t blockDim = c.meta.blockNum;
     uint8_t *tilingPtr = reinterpret_cast<uint8_t *>(c.dev);
 #else
     // ---- 对照路径：完全复刻原实现 ----
     SinkhornTilingData tiling;
     FillTiling(tiling, nMats, nRepeat, fEps);
+    alignas(32) uint8_t stage[SN_TILING_BYTES];
+    SinkhornFillTilingBuffer(stage, tiling);
     at::Tensor tilingTensor = at::empty(
-        {static_cast<int64_t>(sizeof(SinkhornTilingData))}, x.options().dtype(at::kByte));
-    aclrtMemcpy(tilingTensor.mutable_data_ptr(), sizeof(SinkhornTilingData),
-        &tiling, sizeof(SinkhornTilingData), ACL_MEMCPY_HOST_TO_DEVICE);
+        {static_cast<int64_t>(SN_TILING_BYTES)}, x.options().dtype(at::kByte));
+    aclrtMemcpy(tilingTensor.mutable_data_ptr(), SN_TILING_BYTES,
+        stage, SN_TILING_BYTES, ACL_MEMCPY_HOST_TO_DEVICE);
     const uint32_t blockDim = tiling.blockNum;
     uint8_t *tilingPtr = reinterpret_cast<uint8_t *>(tilingTensor.mutable_data_ptr());
 #endif

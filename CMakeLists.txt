@@ -14,6 +14,35 @@ set(ACL_INCLUDE_DIR "$ENV{ASCEND_HOME_PATH}/aarch64-linux/include")
 set(ACL_LIB_DIR "$ENV{ASCEND_HOME_PATH}/lib64")
 
 # ============================================================================
+# 编译期开关（A/B 与逐基因消融用）
+# ============================================================================
+#   SN_KERNEL_VARIANT   0 = 原 per-matrix kernel   1 = S1 padded-AoS 批量（默认）
+#   SN_TILE_TARGET      每核期望处理的矩阵数，反推核数
+#   SN_S1_COPYOUT_MODE  0 = 单次批量 DataCopyPad（默认）  1 = 每行一次（保守回退）
+#   SN_TILING_MODE      0 = 每次分配+同步memcpy(原实现)   1 = 静态缓存（默认）
+#   SN_CORE_QUERY       0 = 每次查询核数(原实现)          1 = 首次后缓存（默认）
+set(SN_KERNEL_VARIANT  1  CACHE STRING "0=original per-matrix kernel, 1=S1 batched")
+set(SN_TILE_TARGET     64 CACHE STRING "target matrices per core")
+set(SN_S1_COPYOUT_MODE 0  CACHE STRING "0=bulk DataCopyPad, 1=per-row fallback")
+set(SN_TILING_MODE     1  CACHE STRING "tiling upload: 0=per-call memcpy, 1=cached")
+set(SN_CORE_QUERY      1  CACHE STRING "core count query: 0=per-call, 1=cached")
+
+if(SN_KERNEL_VARIANT EQUAL 1)
+    set(SN_KERNEL_SRC op_kernel/sinkhorn_normalize_kernel_s1.asc)
+else()
+    set(SN_KERNEL_SRC op_kernel/sinkhorn_normalize_kernel.asc)
+endif()
+
+set(SN_COMMON_DEFS
+    SN_KERNEL_VARIANT=${SN_KERNEL_VARIANT}
+    SN_TILE_TARGET=${SN_TILE_TARGET}
+    SN_S1_COPYOUT_MODE=${SN_S1_COPYOUT_MODE}
+)
+message(STATUS "SN_KERNEL_VARIANT=${SN_KERNEL_VARIANT} (${SN_KERNEL_SRC})")
+message(STATUS "SN_TILE_TARGET=${SN_TILE_TARGET}  SN_S1_COPYOUT_MODE=${SN_S1_COPYOUT_MODE}")
+message(STATUS "SN_TILING_MODE=${SN_TILING_MODE}  SN_CORE_QUERY=${SN_CORE_QUERY}")
+
+# ============================================================================
 # Target 1: 可执行文件 (direct invocation)
 # ============================================================================
 
@@ -37,6 +66,8 @@ target_include_directories(sinkhorn_normalize PRIVATE
 target_compile_options(sinkhorn_normalize PRIVATE
     $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-2201>
 )
+
+target_compile_definitions(sinkhorn_normalize PRIVATE ${SN_COMMON_DEFS})
 
 # ============================================================================
 # Target 3: S1 前置 API 探针（独立可执行，不依赖 torch）
@@ -77,14 +108,8 @@ execute_process(
 set(TORCH_NPU_INCLUDE_DIRS ${TORCH_NPU_PATH}/include)
 set(TORCH_NPU_LIBRARIES ${TORCH_NPU_PATH}/lib)
 
-# ---- P0: host 侧优化开关（用于 A/B 与逐基因消融）----
-#   SN_TILING_MODE 0=每次分配+同步memcpy(原实现)  1=静态缓存(默认)
-#   SN_CORE_QUERY  0=每次查询核数(原实现)         1=首次后缓存(默认)
-set(SN_TILING_MODE 1 CACHE STRING "tiling upload mode: 0=per-call memcpy, 1=cached")
-set(SN_CORE_QUERY  1 CACHE STRING "core count query: 0=per-call, 1=cached")
-
 add_library(sinkhorn_normalize_ops SHARED
-    op_kernel/sinkhorn_normalize_kernel.asc
+    ${SN_KERNEL_SRC}
     op_extension/sinkhorn_normalize_torch.cpp
     op_extension/register.cpp
 )
@@ -123,9 +148,9 @@ target_compile_options(sinkhorn_normalize_ops PRIVATE
 )
 
 target_compile_definitions(sinkhorn_normalize_ops PRIVATE
+    ${SN_COMMON_DEFS}
     SN_TILING_MODE=${SN_TILING_MODE}
     SN_CORE_QUERY=${SN_CORE_QUERY}
 )
-message(STATUS "SN_TILING_MODE=${SN_TILING_MODE}  SN_CORE_QUERY=${SN_CORE_QUERY}")
 
 message(STATUS "TORCH_LIBRARY module 'libsinkhorn_normalize_ops.so' will be built")
