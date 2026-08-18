@@ -32,6 +32,8 @@ done
 [ -n "${ASCEND_HOME_PATH:-}" ] || { echo "请先 source set_env.sh"; exit 1; }
 source "${ASCEND_HOME_PATH}/set_env.sh" || exit 1
 
+source "${SCRIPT_DIR}/_build_lib.sh"
+
 PY="${PYTHON:-python3}"
 SO="libsinkhorn_normalize_ops.so"
 hr() { printf '%.0s=' {1..78}; echo; }
@@ -53,11 +55,9 @@ if [ ${SKIP_BUILD} -eq 0 ]; then
         selected "${name}" || continue
         echo "--- ${name}: ${opts} ---"
         # shellcheck disable=SC2086
-        cmake -S . -B "build_${name}" ${opts} -DSN_TILE_TARGET="${TILE}" 2>&1 \
-            | grep -E "^-- SN_|error" || true
-        cmake --build "build_${name}" --target sinkhorn_normalize_ops -j4 2>&1 \
-            | grep -E "error|Error" && { echo ">>> ${name} 编译失败"; continue; }
-        [ -f "build_${name}/${SO}" ] && echo "OK" || echo ">>> ${name} 产物缺失"
+        sn_configure "build_${name}" ${opts} -DSN_TILE_TARGET="${TILE}" || continue
+        sn_build "build_${name}" sinkhorn_normalize_ops || continue
+        [ -f "build_${name}/${SO}" ] && echo "    OK" || echo "    !! 产物缺失"
     done
 fi
 

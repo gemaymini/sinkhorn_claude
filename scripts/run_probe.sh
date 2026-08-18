@@ -8,12 +8,14 @@ cd "${ROOT}"
 [ -n "${ASCEND_HOME_PATH:-}" ] || { echo "请先 source set_env.sh"; exit 1; }
 source "${ASCEND_HOME_PATH}/set_env.sh" || exit 1
 
+source "${SCRIPT_DIR}/_build_lib.sh"
+
 PY="${PYTHON:-python3}"
 BUILD=build_probe
 
 echo "=== 编译探针 ==="
-cmake -S . -B "${BUILD}" >/dev/null || { echo "cmake 配置失败"; exit 1; }
-cmake --build "${BUILD}" --target probe_sinkhorn -j4 || {
+sn_configure "${BUILD}" || exit 1
+sn_build "${BUILD}" probe_sinkhorn || {
     echo
     echo ">>> 编译失败。把上面的完整报错发回来即可。"
     echo ">>> 如果只是 probe_gather_cost 的标量参数不被支持，"

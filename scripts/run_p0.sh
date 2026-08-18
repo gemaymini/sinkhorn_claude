@@ -19,6 +19,8 @@ cd "${ROOT}"
 SKIP_BUILD=0
 for a in "$@"; do [ "$a" = "--skip-build" ] && SKIP_BUILD=1; done
 
+source "${SCRIPT_DIR}/_build_lib.sh"
+
 PY="${PYTHON:-python3}"
 SO_NAME="libsinkhorn_normalize_ops.so"
 
@@ -39,10 +41,8 @@ AST_RC=$?
 build_variant() {   # $1=目录  $2=SN_TILING_MODE  $3=SN_CORE_QUERY
     local dir="$1" tm="$2" cq="$3"
     echo "--- 编译 ${dir}  (SN_TILING_MODE=${tm}, SN_CORE_QUERY=${cq}) ---"
-    cmake -S . -B "${dir}" -DSN_TILING_MODE="${tm}" -DSN_CORE_QUERY="${cq}" >/dev/null \
-        || { echo "cmake 配置失败: ${dir}"; return 1; }
-    cmake --build "${dir}" --target sinkhorn_normalize_ops -j4 >/dev/null \
-        || { echo "编译失败: ${dir}"; return 1; }
+    sn_configure "${dir}" -DSN_TILING_MODE="${tm}" -DSN_CORE_QUERY="${cq}" || return 1
+    sn_build "${dir}" sinkhorn_normalize_ops || return 1
     [ -f "${dir}/${SO_NAME}" ] || { echo "产物缺失: ${dir}/${SO_NAME}"; return 1; }
     echo "OK: ${dir}/${SO_NAME}"
 }
