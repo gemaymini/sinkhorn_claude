@@ -30,7 +30,7 @@ def reference(x, repeat=10, eps=1e-6):
 
 def s1_kernel(x_flat, n, repeat=10, eps=1e-6):
     """逐条模拟 kernel。x_flat: (n*16,) float32"""
-    nE = (n + 1) & ~1                       # BlockReduceSum 每 repeat 覆盖 2 个矩阵
+    nE = (n + 7) & ~7                       # 宽 ColNormalize 每 repeat 覆盖 8 个矩阵
     col_eps = max(eps, TINY)                # 填充列的和恒为 0，除数必须非零
 
     # ---- CopyIn: n*4 行，每行 4 个有效 + 右补 4 个 PAD_FILL ----

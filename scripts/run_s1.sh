@@ -2,11 +2,13 @@
 # =============================================================================
 # S1 变体矩阵：定位精度问题 + 量化各修法的代价
 #
-#   v0       原 per-matrix kernel（对照，用满核）
-#   s1_base  S1，裸 Reciprocal，不减 max      <- 上一轮实测: 6.88x 但精度 0.117 / big 失败
-#   s1_nr    S1 + Newton-Raphson 修正倒数     <- 单独看 NR 能修多少
-#   s1_full  S1 + NR + 减 max                <- 推荐配置
-#   s1_div   S1 + 直接 Div + 减 max          <- 精度上限参考，看 Div 的时间代价
+#   v0       原 per-matrix kernel（对照，用满核）           M1 ≈ 235us
+#   s1_div   S1a：Div + 减 max，窄 ColNormalize            M1 ≈ 136us（上一轮最佳）
+#   s1b_div  S1b：+ 宽 ColNormalize（8 矩阵/repeat）        <- 本轮主角
+#   s1b_nr   S1b 但用 Reciprocal+NR 而非 Div               <- 宽路径下再比一次两者
+#
+# 判据用 M1（裸算子 + sync），不要用 speedup —— baseline 跨进程漂移 ±15%，
+# 会把 2% 的真实差异淹没在 15% 的噪声里。
 #
 # 用法：  bash scripts/run_s1.sh [--skip-build] [--tile N] [--only 名字,名字]
 # =============================================================================
@@ -37,10 +39,9 @@ hr() { printf '%.0s=' {1..78}; echo; }
 # 名字 | cmake 选项
 VARIANTS=(
   "v0|-DSN_KERNEL_VARIANT=0"
-  "s1_base|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=0 -DSN_S1_NR_STEPS=0 -DSN_S1_USE_MAX=0"
-  "s1_nr|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=0 -DSN_S1_NR_STEPS=2 -DSN_S1_USE_MAX=0"
-  "s1_full|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=0 -DSN_S1_NR_STEPS=2 -DSN_S1_USE_MAX=1"
-  "s1_div|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1"
+  "s1_div|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=0"
+  "s1b_div|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=1 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1"
+  "s1b_nr|-DSN_KERNEL_VARIANT=1 -DSN_S1_DIV_MODE=0 -DSN_S1_NR_STEPS=2 -DSN_S1_USE_MAX=1 -DSN_S1_COLNORM_WIDE=1"
 )
 
 selected() { [ -z "${ONLY}" ] && return 0; case ",${ONLY}," in *",$1,"*) return 0 ;; esac; return 1; }
