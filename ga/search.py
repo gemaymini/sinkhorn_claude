@@ -151,7 +151,7 @@ def island_ga(bud, backend, rng, py, pop_per_island=6, elite=1,
 
 
 # ---------------------------------------------------------------- TPE
-def tpe_search(bud, backend, rng, py):
+def tpe_search(bud, backend, rng, py, seeded=True):
     try:
         import optuna
     except ImportError:
@@ -169,11 +169,29 @@ def tpe_search(bud, backend, rng, py):
 
     st = optuna.create_study(direction="maximize",
                              sampler=optuna.samplers.TPESampler(seed=rng.randint(0, 10**6)))
+    if seeded:
+        # 让 TPE 也能从种子中学习，否则相对 GA 被不公平地削弱
+        for g in G.SEEDS.values():
+            st.enqueue_trial({k: str(G.repair(dict(g))[k]) for k in G.GENES})
     st.optimize(obj, n_trials=bud.n * 3, catch=(Exception,))
 
 
 ALGOS = {"ga": island_ga, "random": random_search,
          "local": local_search, "tpe": tpe_search}
+
+
+def eval_seeds(bud, backend, rng, py):
+    """所有算法统一先把已知强个体评一遍，保证收敛曲线起点一致。
+
+    这一步是公平性的关键：原来只有 ga 和 local 会碰到种子，random / tpe 从零开始，
+    于是 GA 的曲线一上来就高——那是播种带来的，不是算法带来的。
+    统一播种之后，GA 相对随机搜索的优势才真正来自「从好个体繁殖」这一算法特性。
+    用 --no-seed 关掉即为 E-C 消融实验（有/无播种）。
+    """
+    for name, g in G.SEEDS.items():
+        if not bud.left():
+            return
+        _ev(G.repair(dict(g)), bud, backend, rng, py, "seed", -1)
 
 
 def main():
@@ -184,6 +202,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--db", default=None)
     ap.add_argument("--python", default=sys.executable)
+    ap.add_argument("--no-seed", action="store_true",
+                    help="不播种已知强个体（E-C 消融用）")
     args = ap.parse_args()
 
     db = args.db or "ga/{}_{}_{}.sqlite".format(args.algo, args.backend, args.seed)
@@ -201,11 +221,19 @@ def main():
     if args.backend == "real":
         print("单次评估约 {}s（cmake configure + build + 精度门禁 + 计时），"
               "预计 {:.0f} 分钟".format(est, args.budget * est / 60))
+    print("播种: {}".format("否（--no-seed）" if args.no_seed
+                             else "是，先评估 {} 个已知强个体".format(len(G.SEEDS))))
     print("进度（缓存命中不计入预算，也不打印）:", flush=True)
 
     t0 = time.time()
     try:
-        ALGOS[args.algo](bud, args.backend, rng, args.python)
+        if not args.no_seed:
+            eval_seeds(bud, args.backend, rng, args.python)
+        if args.algo == "tpe":
+            ALGOS[args.algo](bud, args.backend, rng, args.python,
+                             seeded=not args.no_seed)
+        else:
+            ALGOS[args.algo](bud, args.backend, rng, args.python)
     except KeyboardInterrupt:
         print("\n已中断，保留部分结果于 {}".format(partial), flush=True)
     wall = time.time() - t0
