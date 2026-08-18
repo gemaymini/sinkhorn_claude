@@ -21,7 +21,7 @@ for a in "$@"; do [ "$a" = "--skip-build" ] && SKIP_BUILD=1; done
 
 source "${SCRIPT_DIR}/_build_lib.sh"
 
-PY="${PYTHON:-python3}"
+PY="$(sn_require_torch_python)" || exit 1
 SO_NAME="libsinkhorn_normalize_ops.so"
 
 hr() { printf '%.0s=' {1..78}; echo; }

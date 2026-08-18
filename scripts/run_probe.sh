@@ -10,7 +10,7 @@ source "${ASCEND_HOME_PATH}/set_env.sh" || exit 1
 
 source "${SCRIPT_DIR}/_build_lib.sh"
 
-PY="${PYTHON:-python3}"
+PY="$(sn_require_torch_python)" || exit 1
 BUILD=build_probe
 
 echo "=== 编译探针 ==="
