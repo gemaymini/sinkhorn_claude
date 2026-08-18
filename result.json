@@ -1,0 +1,39 @@
+{
+  "status": "success",
+  "operator": "sinkhorn_normalize",
+  "reference": "PyTorch SinkhornNormalize (softmax + 10 iterations of row/col normalize, eps=1e-6)",
+  "target": "Ascend 910B2 (dav-2201), CANN 9.0.0",
+  "input_shape": [1, 1024, 4, 4],
+  "dtype": "float32",
+  "repeat": 10,
+  "eps": 1e-6,
+  "baseline_us": 1097.66,
+  "best_us": 237.48,
+  "ratio": 0.2162,
+  "speedup": 4.622,
+  "precision": true,
+  "precision_note": "Direct-invoke verify_result.py: max diff 1.49e-07 (atol=1e-5, rtol=1e-4). PyTorch path test_torch.py: all 6 test cases passed (max diff <= 1.79e-07). Stability: 3 consecutive runs gave speedup 4.63x / 4.70x / 4.64x (mean ~4.66x).",
+  "best_kernel": "op_kernel/sinkhorn_normalize_kernel.asc",
+  "core_files": [
+    "op_kernel/sinkhorn_normalize_tiling.h",
+    "op_kernel/sinkhorn_normalize_kernel.asc",
+    "op_host/sinkhorn_normalize.asc",
+    "op_host/data_utils.h",
+    "op_extension/sinkhorn_normalize_torch.cpp",
+    "op_extension/register.cpp",
+    "op_extension/ops.h",
+    "CMakeLists.txt",
+    "run.sh",
+    "scripts/golden.py",
+    "scripts/gen_data.py",
+    "scripts/verify_result.py",
+    "scripts/test_torch.py",
+    "scripts/perf_test.py",
+    "README.md"
+  ],
+  "package": {
+    "name": "output.tar.gz",
+    "format": "tar.gz",
+    "contents": "All core source files, build files, and test scripts for the sinkhorn_normalize AscendC operator."
+  }
+}
