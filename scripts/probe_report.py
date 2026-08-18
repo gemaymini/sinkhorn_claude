@@ -103,9 +103,19 @@ def main():
             print("\n  >>> 期望 {}... -> {}".format(want[:6], verdicts["S5"]))
 
         elif i == 6:
-            ok = near(s[0], 1.0) and near(s[1], 0.5, 1e-3) and near(s[3], 0.25, 1e-3)
-            verdicts["S6"] = "OK" if ok else "UNKNOWN"
-            print("\n  >>> Reciprocal: {}".format("可用" if ok else "结果异常"))
+            # 量化 Reciprocal 的实际有效位数（硬件通常是快速近似，不是 fp32 精度）
+            import math
+            errs = []
+            for k in range(1, 17):
+                exact = 1.0 / k
+                errs.append(abs(float(s[k - 1]) - exact) / exact)
+            rel = max(errs)
+            bits = -math.log2(rel) if rel > 0 else 24.0
+            verdicts["S6"] = "{:.0f}bit".format(bits)
+            print("\n  >>> Reciprocal 最大相对误差 {:.2e}  =>  约 {:.0f} 位有效精度".format(rel, bits))
+            if bits < 20:
+                print("      这是快速近似指令，不是 fp32 精度。直接用会让 20 次连续归一化后")
+                print("      的误差到 1e-3 量级。对策：Newton-Raphson 修正，或直接用 Div。")
 
     print("\n" + "=" * 74)
     print("判定汇总")
