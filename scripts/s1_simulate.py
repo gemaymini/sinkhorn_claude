@@ -41,9 +41,16 @@ def s1_kernel(x_flat, n, repeat=10, eps=1e-6):
     if nE > n:                              # 尾部补齐的矩阵填 0
         z[n * 32: nE * 32] = 0.0
 
-    # ---- BuildEpsVector: [eps,eps,eps,eps,0,0,0,0] 重复 ----
-    eps_pad = np.tile(
-        np.array([eps] * 4 + [0.0] * 4, dtype=np.float32), nE * 4)
+    # ---- BuildEpsVectorArith: 4 条标量-向量指令纯算术构造 ----
+    # 此时 z 还是「填充位 = PAD_FILL、有效位 = x」的状态
+    MASK_BIAS = np.float32(900.0)
+    eps_pad = np.maximum((z + MASK_BIAS).astype(np.float32), np.float32(0.0))
+    eps_pad = np.minimum(eps_pad, np.float32(1.0)).astype(np.float32)
+    eps_pad = (eps_pad * np.float32(eps)).astype(np.float32)
+    # 断言构造出来的正是 [eps,eps,eps,eps,0,0,0,0]（|x| < 900 的前提）
+    lanes = np.arange(nE * 32) % 8
+    assert np.all(eps_pad[(lanes < 4)][: n * 16] == np.float32(eps)), "有效位没拿到 eps"
+    assert np.all(eps_pad[(lanes >= 4)][: n * 16] == 0.0), "eps 污染了填充位"
 
     # ---- Exp: 填充位 exp(-1000) 下溢为精确的 0 ----
     with np.errstate(under="ignore"):
