@@ -26,6 +26,7 @@ class Budget:
         self.curve = []          # (真实评估次数, 至今最优 fitness)
         self.best = 0.0
         self.best_g = None
+        self.wall = []
 
     def spend(self, g, res):
         if not res.get("cached"):
@@ -41,8 +42,20 @@ class Budget:
 
 
 def _ev(g, bud, backend, rng, py, algo, gen):
+    t0 = time.time()
     res = E.evaluate(g, bud.cache, backend, rng, py, algo, gen)
+    dt = time.time() - t0
+    prev = bud.used
     bud.spend(g, res)
+    if bud.used != prev:                       # 真实评估才打印（缓存命中不打）
+        bud.wall.append(dt)
+        avg = sum(bud.wall) / len(bud.wall)
+        eta = avg * max(0, bud.n - bud.used)
+        detail = ("fit={:.4f} v1={:.1f}us".format(res["fitness"], res["v1_us"])
+                  if res["ok"] else res["tag"])
+        print("  [{:>3}/{}] {:>5.0f}s  {:<32} {:<26} best={:.4f}  剩余≈{:.0f}分钟".format(
+            bud.used, bud.n, dt, G.label(g), detail, bud.best, eta / 60),
+            flush=True)
     return res
 
 
@@ -174,17 +187,31 @@ def main():
     args = ap.parse_args()
 
     db = args.db or "ga/{}_{}_{}.sqlite".format(args.algo, args.backend, args.seed)
-    if os.path.exists(db):
-        os.remove(db)
-    cache = C.Cache(db)
+    partial = db + ".partial"
+    for f in (db, partial):
+        if os.path.exists(f):
+            os.remove(f)
+    cache = C.Cache(partial)
     rng = random.Random(args.seed)
     bud = Budget(args.budget, cache)
 
+    est = 51 if args.backend == "real" else 0.001
+    print("算法={}  后端={}  seed={}  预算={} 次真实评估".format(
+        args.algo, args.backend, args.seed, args.budget))
+    if args.backend == "real":
+        print("单次评估约 {}s（cmake configure + build + 精度门禁 + 计时），"
+              "预计 {:.0f} 分钟".format(est, args.budget * est / 60))
+    print("进度（缓存命中不计入预算，也不打印）:", flush=True)
+
     t0 = time.time()
-    ALGOS[args.algo](bud, args.backend, rng, args.python)
+    try:
+        ALGOS[args.algo](bud, args.backend, rng, args.python)
+    except KeyboardInterrupt:
+        print("\n已中断，保留部分结果于 {}".format(partial), flush=True)
     wall = time.time() - t0
 
     st = cache.stats()
+    print()
     print("=" * 78)
     print("算法={}  后端={}  seed={}  预算={} 次真实评估".format(
         args.algo, args.backend, args.seed, args.budget))
@@ -198,6 +225,9 @@ def main():
     print("  各结局            : {}".format(st["by_tag"]))
     print("  耗时              : {:.1f}s  ({:.2f}s/次)".format(
         wall, wall / max(1, st["misses"])))
+    cache.con.close()
+    # 跑完才改成正式名字：中断留下的 .partial 不会让 run_all.sh 误判为已完成
+    os.rename(partial, db)
     print("  收敛曲线已存入     : {}".format(db))
     return 0
 
