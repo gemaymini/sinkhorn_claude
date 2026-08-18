@@ -59,9 +59,24 @@ def describe(node):
 
 
 def install_npu_stub():
-    """Mac 上没有 torch_npu，塞一个桩以便 import 成功。"""
-    if "torch_npu" not in sys.modules:
+    """仅在环境里**真的没有** torch_npu 时才塞桩（Mac 本地）。
+
+    真机上 torch_npu 是存在的：如果这里把 sys.modules["torch_npu"] 覆盖成假模块，
+    torch 的 device backend autoload 会拿到不完整的模块并抛
+    "Failed to load the backend extension: torch_npu"。
+    返回 True 表示装了桩。"""
+    if "torch_npu" in sys.modules:
+        return False
+    try:
+        import torch  # noqa: F401
+    except Exception:                                    # noqa: BLE001
+        pass
+    try:
+        import torch_npu  # noqa: F401
+        return False
+    except Exception:                                    # noqa: BLE001
         sys.modules["torch_npu"] = types.ModuleType("torch_npu")
+        return True
 
 
 def main():
@@ -106,7 +121,8 @@ def main():
     print("\n" + "-" * 72)
     print("在隔离命名空间中 exec 过滤后的代码（不提供 __file__，模拟最坏情况）")
     print("-" * 72)
-    install_npu_stub()
+    stubbed = install_npu_stub()
+    print("torch_npu: {}".format("使用桩（本机无 torch_npu）" if stubbed else "使用真实模块"))
     ast.fix_missing_locations(new_tree)
     code = compile(new_tree, filename="<filtered>", mode="exec")
     ns = {"__name__": "submitted_module"}                 # 故意不放 __file__

@@ -55,8 +55,10 @@ def main():
     ap.add_argument("--tag", default="", help="本次运行的标签，便于 A/B 对比")
     ap.add_argument("--warmup", type=int, default=200)
     ap.add_argument("--repeat", type=int, default=500)
-    ap.add_argument("--repeat-torch", type=int, default=10,
-                    help="参考实现算子多、较慢，用较少迭代")
+    ap.add_argument("--repeat-torch", type=int, default=100,
+                    help="参考实现算子多、较慢，用较少迭代（太少会与官方口径不可比）")
+    ap.add_argument("--module", default="submission/model_new.py",
+                    help="用于测量完整提交路径 M6")
     args = ap.parse_args()
 
     if args.device == "npu":
@@ -101,7 +103,7 @@ def main():
     rows.append(("M5  单个最简 NPU 算子 + sync  ★地板", m5))
 
     # ---- 参考实现 ----
-    m0 = median_us(reference, sync, 20, max(args.repeat_torch, 20))
+    m0 = median_us(reference, sync, 50, max(args.repeat_torch, 50))
     rows.append(("M0  参考实现 forward + sync", m0))
 
     # ---- 自定义算子 ----
@@ -115,8 +117,26 @@ def main():
 
         m1 = median_us(custom, sync, args.warmup, args.repeat, sync_each=True)
         m2 = median_us(custom, sync, args.warmup, args.repeat, sync_each=False)
-        rows.append(("M1  自定义算子 forward + sync（官方口径）", m1))
-        rows.append(("M2  自定义算子 forward（不 sync）= host 端耗时", m2))
+        rows.append(("M1  裸算子调用 + sync", m1))
+        rows.append(("M2  裸算子调用（不 sync）= host 端耗时", m2))
+
+    # M6：走完整的 ModelNew.forward（含 Python wrapper），与官方口径一致
+    m6 = None
+    if have_custom and os.path.isfile(args.module):
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from bench_official import load_module
+            ns = load_module(args.module, apply_filter=True)
+            model = ns["ModelNew"]()
+
+            def full_path():
+                with torch.no_grad():
+                    return model.forward(x)
+
+            m6 = median_us(full_path, sync, args.warmup, args.repeat)
+            rows.append(("M6  ModelNew.forward + sync（完整提交路径）", m6))
+        except Exception as e:                           # noqa: BLE001
+            print("M6 测量跳过: {}: {}".format(type(e).__name__, e))
 
     print("\n{:<44} {:>12}".format("测量项", "median (us)"))
     print("-" * 78)
@@ -133,6 +153,9 @@ def main():
         print("  host 端占比             = M2 / M1 = {:.1%}".format(m2 / m1))
         print("  device+sync 残差        = M1 - M2 = {:.2f} us".format(m1 - m2))
         print("  距离地板还差            = M1 - M5 = {:.2f} us".format(m1 - m5))
+        if m6 is not None:
+            print("  Python wrapper 开销      = M6 - M1 = {:.2f} us".format(m6 - m1))
+            print("  完整路径 speedup         = M0 / M6 = {:.2f}x".format(m0 / m6))
         if m2 > m5:
             print("\n  ⚠ host 端耗时 ({:.2f}us) 已超过单算子地板 ({:.2f}us)，".format(m2, m5))
             print("    说明 host 绑定层存在阻塞调用（同步 memcpy / 设备查询），优先修这里。")

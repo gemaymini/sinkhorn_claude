@@ -10,9 +10,9 @@
 
 1. **官方容差是 `atol=1e-2, rtol=1e-2`**，比仓库自测用的 `1e-4/1e-5` 宽两三个数量级。本地 20 seed 实测（`experiments/numeric_feasibility.py`）证实：**省掉全部 eps、softmax 免减 max、全程 fp16 计算，三者叠加后裕度只占 6.1%**，可放心启用。
 2. **官方计时是 `perf_counter` 包住整个 `model.forward()` 再 `sync`，warmup 200 / repeat 500 / 取 median**。这意味着 **Python 层、torch dispatch、host 端 ACL 调用、kernel launch、stream sync 全部计入**。
-3. 因此**最大的一块肉不在 kernel 里，在 host 绑定层**：当前 `sinkhorn_normalize_torch()` 每次调用都做一次 `aclrtGetDeviceInfo` 查核数、两次张量分配、以及**一次同步阻塞的 `aclrtMemcpy` 传 tiling**。这几项是纯固定开销、零风险可去除，优先级高于任何 kernel 微调。
+3. **（P0 已验证）** 因此第一块肉在 host 绑定层：当前 `sinkhorn_normalize_torch()` 每次调用都做一次 `aclrtGetDeviceInfo` 查核数、两次张量分配、以及**一次同步阻塞的 `aclrtMemcpy` 传 tiling**。这几项是纯固定开销、零风险可去除，优先级高于任何 kernel 微调。
 4. kernel 本身是**小粒度指令 + 标量↔向量同步**延迟瓶颈：每个 4×4 矩阵 ~228 条向量指令、~198 个 `PipeBarrier`、**~82 对标量-向量同步**，而每条向量指令只用到 8~32 个 lane（fp32 满载是 64）。
-5. **现实目标：30~40x**。拆解：baseline ~1100us ÷（kernel 计算 ~5us + launch ~10us + host/dispatch ~10us + sync ~5us ≈ 30us）。
+5. **现实目标：15~21x（硬上限 22.7x）**。已由 P0 真机实测确定，见 §2.3。
 6. **明确不建议截断 Sinkhorn 迭代**（见 §3），收益小、风险是直接判 0 分。
 
 ---
@@ -103,6 +103,59 @@ def time_forward(model, inputs, seed, warmup, repeat):
 修法（零精度风险）：把 tiling 改成 kernel 的**标量入参**彻底去掉 tiling 张量；或 `static` 缓存 tiling 张量 + `aclrtMemcpyAsync` 走 stream；或形状固定时编译期常量化。
 
 > **P0 阶段必须先用 msprof + host 打点把 kernel 时间 / host 时间的比例测出来。** 如果 host 占了 100us+，那么先做 §2.2 就能白拿一大截加速比，且完全不用碰 kernel。
+
+---
+
+## 2.3 P0 真机实测结果（910B2，CANN 9.0.0，已完成）
+
+`bash scripts/run_p0.sh` 的产出。**所有后续目标都以这组数为准。**
+
+### host 侧优化的实际收益
+
+| 指标 | `orig`（每次同步 memcpy + 查核数） | `opt`（静态缓存） | 变化 |
+|---|---|---|---|
+| M2 host 端耗时（不 sync） | 114.28us | **39.78us** | **−74.5us（−65%）** |
+| M1 裸算子 + sync | 301.41us | 237.19us | −64.2us |
+| **官方口径 speedup** | **3.834x** | **4.629x** | **+20.7%** |
+
+> 那个每次调用的同步 `aclrtMemcpy` 一项就值 20% 的加速比。零精度风险。
+
+### 时间地板（决定一切目标的上限）
+
+| 测量项 | 耗时 |
+|---|---|
+| M3 `torch.npu.synchronize()` 空转 | 16.8us |
+| M4 `torch.empty_like` + sync | 31.6us（推出分配器本身 ≈ 15us） |
+| **M5 单个最简 NPU 算子往返 + sync** | **55.3us ← 硬地板** |
+| M0 参考实现 forward + sync | 1240~1307us（**波动 5%，必须固定成常量**） |
+
+**`speedup` 理论上限 = M0 / M5 ≈ 1250 / 55.3 ≈ 22.7x。** 任何 kernel 优化都无法突破。
+这比方案初稿的估计（30~40x）低，原因是这台机器的 host-device 往返开销偏高
+（光 sync 空转就 16.8us）。
+
+### 当前时间构成（`opt` 变体）
+
+```
+官方口径 v1 = 267.88us
+  ├─ Python wrapper (ModelNew.forward)   ≈ 30us   ← 待 M6 确认，可能含进程漂移
+  ├─ host CPU (dispatch + empty_like +
+  │            launch)                    ≈ 40us   ← 其中 empty_like 占 ~15us，省不掉
+  └─ kernel 净计算 + launch/sync 残差      ≈ 182us  ← 唯一的大头
+```
+
+### kernel 优化目标推演
+
+| kernel 净时间 | 预期 M1 | 预期 speedup | 备注 |
+|---|---|---|---|
+| 182us | 237us | 4.63x | 现状 |
+| 60us | ~115us | ~10.8x | |
+| **30us** | **~85us** | **~14.7x** | **性价比拐点** |
+| 15us | ~70us | ~17.8x | |
+| 5us | ~60us | ~20.8x | |
+| 0（理论） | 55us | 22.7x | 硬上限 |
+
+**边际收益递减非常明显：压到 30us 就能拿到 ~15x（3.2 倍提升），再往下拼到 5us 也只多拿 40%。**
+这直接改变了 P1 的路线选择 —— 见 §11。
 
 ---
 
@@ -373,8 +426,9 @@ experiments/
 
 | 阶段 | 内容 | 产出 | 预计 |
 |---|---|---|---|
-| **P0** | ① msprof + host 打点，拆出 kernel/host/launch 三段时间 ② 验证 AST 过滤下 `.so` 能否正常加载 ③ 只改 host 侧（去 memcpy/去查核数）测一次 | 时间拆解表 + **可能白拿的一大截加速比** | 0.5 天 |
-| **P1** | 手工写 S1/S2 骨架，真机实测 `GatherMask`/`Gather` 吞吐，确定转置路线 | 2~3 个可用骨架 + 实测数据 | 2 天 |
+| **P0** ✅ | ① host 打点拆出三段时间 ② 验证 AST 过滤下 `.so` 能加载 ③ 只改 host 侧 | **已完成**：3.834x → 4.629x，地板 55.3us，上限 22.7x（§2.3） | 已完成 |
+| **P1** | **先只写 S1（AoS 批量化 + 消除标量同步）** —— 按 §2.3 的推演，S1 若能把 kernel 压到 30~50us 就已拿到 12~15x；S2（SoA 转置）留到 S1 落地后再按边际收益决定是否值得 | S1 骨架 + 实测 | 1.5 天 |
+| **P1b** | 仅当 S1 结果显示还有明显空间时才做：S2 SoA 平面 + `GatherMask` 吞吐实测 | S2 骨架 | 1.5 天 |
 | **P2** | 搭 harness（render/evaluate/cache/mock），复用官方 auto_bench | Mac mock 跑通 + 真机跑通 10 个体 | 1.5 天 |
 | **P3** | Track A 全量搜索 + E-A/B/C/D 对照 | 收敛曲线、最优个体 | 2 天（含 24h 机时） |
 | **P4** | Track B 精修 + E-F/E-G 消融 | 归因图 | 1.5 天 |
@@ -399,4 +453,4 @@ experiments/
 
 ## 13. 一句话总结
 
-**先把 host 绑定层每次调用的同步 memcpy 和设备查询干掉（零风险、可能白拿一大截），再把 kernel 从 per-matrix 标量同步重写成 SoA 平面 + fp16 批量向量化（实测裕度 16x，安全），最后用岛屿模型 GA 在 20 维空间搜细节、用逐基因消融把收益归因讲清楚。截断迭代不要碰。**
+**host 侧的同步 memcpy 已经干掉，白拿 +21%（3.83→4.63x）。地板实测 55.3us，硬上限 22.7x。剩下 182us 全在 kernel 里：先做 S1（AoS 批量化 + 消除 82 对/矩阵的标量同步 + fp16），压到 30us 就有 ~15x；S2 完整 SoA 转置只多换 40%，按边际收益再定。最后用岛屿模型 GA 搜细节、用逐基因消融归因。截断迭代不要碰。**
