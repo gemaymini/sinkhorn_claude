@@ -64,7 +64,7 @@ for v in orig opt; do
     ${PY} scripts/p0_host_breakdown.py --so "${SO}" --tag "${v}"
     echo
     SINKHORN_OPS_SO="${SO}" ${PY} scripts/bench_official.py \
-        --module submission/model_new.py --device npu
+        --module submission/model_new.py --device npu --mode both
 done
 
 hr

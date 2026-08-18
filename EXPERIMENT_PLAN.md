@@ -106,56 +106,73 @@ def time_forward(model, inputs, seed, warmup, repeat):
 
 ---
 
-## 2.3 P0 真机实测结果（910B2，CANN 9.0.0，已完成）
+## 2.3 P0 真机实测结果（910B2，CANN 9.0.0，两次独立运行，已完成）
 
 `bash scripts/run_p0.sh` 的产出。**所有后续目标都以这组数为准。**
 
 ### host 侧优化的实际收益
 
-| 指标 | `orig`（每次同步 memcpy + 查核数） | `opt`（静态缓存） | 变化 |
+| 指标 | `orig`（每次同步 memcpy + 查核数） | `opt`（静态缓存） | 差值 |
 |---|---|---|---|
-| M2 host 端耗时（不 sync） | 114.28us | **39.78us** | **−74.5us（−65%）** |
-| M1 裸算子 + sync | 301.41us | 237.19us | −64.2us |
-| **官方口径 speedup** | **3.834x** | **4.629x** | **+20.7%** |
+| M2 host 端耗时（不 sync） | 114.28 / 119.34us | **39.78 / 40.02us** | **−76.9us（−66%）** |
+| M1 裸算子 + sync | 301.41 / 309.74us | **237.19 / 240.31us** | **−66.8us（−21.9%）** |
+| 官方口径 speedup | 3.834x / 4.190x | 4.629x / 4.741x | **+13~21%** |
 
-> 那个每次调用的同步 `aclrtMemcpy` 一项就值 20% 的加速比。零精度风险。
+> 那个每次调用的同步 `aclrtMemcpy` 一项就值 ~17% 的加速比（两次均值），零精度风险。
+> **M1 是最稳的判据**（两次运行差 1.3%），speedup 因 baseline 漂移反而不稳。
 
-### 时间地板（决定一切目标的上限）
+### 测量噪声（关键工程结论）
+
+| 量 | 观测范围 | 波动 |
+|---|---|---|
+| M0 参考实现（baseline） | 1173.62 ~ 1314.06us | **±6%** |
+| M5 地板 | 54.90 ~ 58.97us | ±4% |
+| M1（`opt`） | 237.19 ~ 240.31us | ±0.7% |
+
+**baseline 的 ±6% 漂移直接污染 speedup 排序**，而官方口径是"v0 全测完再测 v1"，慢漂移会整体偏向一侧。
+对策已实现在 `scripts/bench_official.py`：
+- `--mode interleaved`（默认）：把 repeat 切成 rounds 段轮流测 v0/v1，抵消慢漂移，调优内部对比用
+- `--baseline-ms`：固定 baseline 常量、跳过 v0 测量，**GA 的 fitness 用这个，评估耗时直接减半**
+- `--mode official`：严格顺序口径，对外报数用
+
+### Python wrapper 开销 = 噪声，无需优化
+
+M6（完整 `ModelNew.forward`）− M1（裸算子调用）：`orig` 为 **−6.48us**，`opt` 为 **+8.19us**。
+一正一负 ⇒ 落在噪声内。**`ModelNew.forward` 里的 `x.device.type` 检查等是免费的，基因组里的
+`python_wrapper` 一项可以直接删掉。**
+
+### 时间地板
 
 | 测量项 | 耗时 |
 |---|---|
-| M3 `torch.npu.synchronize()` 空转 | 16.8us |
-| M4 `torch.empty_like` + sync | 31.6us（推出分配器本身 ≈ 15us） |
-| **M5 单个最简 NPU 算子往返 + sync** | **55.3us ← 硬地板** |
-| M0 参考实现 forward + sync | 1240~1307us（**波动 5%，必须固定成常量**） |
+| M3 `torch.npu.synchronize()` 空转 | 16.5~17.5us |
+| M4 `torch.empty_like` + sync | 30.3~31.6us（推出分配器本身 ≈ 14us） |
+| **M5 单个最简 NPU 算子往返 + sync** | **~56us ← 硬地板** |
 
-**`speedup` 理论上限 = M0 / M5 ≈ 1250 / 55.3 ≈ 22.7x。** 任何 kernel 优化都无法突破。
-这比方案初稿的估计（30~40x）低，原因是这台机器的 host-device 往返开销偏高
-（光 sync 空转就 16.8us）。
+**`speedup` 理论上限 ≈ 1250 / 56 ≈ 22x。** 任何 kernel 优化都无法突破。
+比方案初稿估的 30~40x 低，原因是这台机器 host-device 往返开销偏高（光 sync 空转就 17us）。
 
-### 当前时间构成（`opt` 变体）
+### 当前时间构成（`opt`）
 
 ```
-官方口径 v1 = 267.88us
-  ├─ Python wrapper (ModelNew.forward)   ≈ 30us   ← 待 M6 确认，可能含进程漂移
-  ├─ host CPU (dispatch + empty_like +
-  │            launch)                    ≈ 40us   ← 其中 empty_like 占 ~15us，省不掉
-  └─ kernel 净计算 + launch/sync 残差      ≈ 182us  ← 唯一的大头
+M1 = 238.8us（两次均值）
+  ├─ host CPU（dispatch + empty_like ~14us + launch）  ≈ 40us   ← 已低于地板，不再是瓶颈
+  └─ kernel 净计算 + launch/sync 残差                   ≈ 182us  ← 唯一的大头（M1 − M5，两次都是 181.5us）
 ```
 
-### kernel 优化目标推演
+### kernel 优化目标推演（固定 baseline = 1250us）
 
-| kernel 净时间 | 预期 M1 | 预期 speedup | 备注 |
-|---|---|---|---|
-| 182us | 237us | 4.63x | 现状 |
-| 60us | ~115us | ~10.8x | |
-| **30us** | **~85us** | **~14.7x** | **性价比拐点** |
-| 15us | ~70us | ~17.8x | |
-| 5us | ~60us | ~20.8x | |
-| 0（理论） | 55us | 22.7x | 硬上限 |
+| kernel 净时间 | 预期 M1 | 预期 speedup |
+|---|---|---|
+| 182us | 239us | 5.2x | 现状 |
+| 60us | ~117us | ~10.7x |
+| **30us** | **~87us** | **~14.4x** ← 性价比拐点 |
+| 15us | ~72us | ~17.4x |
+| 5us | ~62us | ~20.2x |
+| 0（理论） | 56us | 22.3x |
 
-**边际收益递减非常明显：压到 30us 就能拿到 ~15x（3.2 倍提升），再往下拼到 5us 也只多拿 40%。**
-这直接改变了 P1 的路线选择 —— 见 §11。
+**边际收益递减很陡：压到 30us 拿 ~14x（2.8 倍提升），再拼到 5us 只多拿 40%。**
+据此把 P1 的路线从"直接上 S2 SoA 转置"改成"先做 S1"，见 §11。
 
 ---
 

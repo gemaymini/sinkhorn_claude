@@ -39,6 +39,24 @@ target_compile_options(sinkhorn_normalize PRIVATE
 )
 
 # ============================================================================
+# Target 3: S1 前置 API 探针（独立可执行，不依赖 torch）
+# ============================================================================
+
+add_executable(probe_sinkhorn probe/probe_main.asc)
+
+target_link_libraries(probe_sinkhorn PRIVATE
+    tiling_api register platform unified_dlog dl m graph_base
+)
+
+target_include_directories(probe_sinkhorn PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/probe
+)
+
+target_compile_options(probe_sinkhorn PRIVATE
+    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-2201>
+)
+
+# ============================================================================
 # Target 2: TORCH_LIBRARY module (libsinkhorn_normalize_ops.so)
 # ============================================================================
 
