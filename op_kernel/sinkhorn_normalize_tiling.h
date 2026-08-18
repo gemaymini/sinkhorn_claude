@@ -47,7 +47,11 @@ constexpr float SN_PAD_FILL = -1000.0f;
 // 的数组，kernel 用已验证的 `DataCopyPad + rightPadding=4` 把它展开成
 // [eps,eps,eps,eps,0,0,0,0] 重复的向量，一次 Add 即可。
 // sizeof(SinkhornTilingData) 恰好是 32 字节，尾部数组天然 32B 对齐。
-constexpr uint32_t SN_EPSVEC_LEN = SN_TILE_MAX * SN_MHC;
+// 长度必须按**有效元素**算：每矩阵 4 行 × 4 有效 = SN_MAT_SIZE 个源 float，
+// 经 DataCopyPad(blockCount=SN_TILE_MAX*SN_MHC, blockLen=16B, rightPad=4)
+// 展开成 SN_TILE_MAX*SN_PAD_MAT 个目标 float。
+// （曾误写成 SN_TILE_MAX*SN_MHC，只有 1/4，导致越界读垃圾、后半段矩阵 eps 失效）
+constexpr uint32_t SN_EPSVEC_LEN = SN_TILE_MAX * SN_MAT_SIZE;
 
 // ---- Tiling ----
 struct SinkhornTilingData {
