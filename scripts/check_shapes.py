@@ -40,6 +40,7 @@ CASES = [
     ("全零输入 [1,64,4,4]", (1, 64, 4, 4), "zeros"),
     ("均匀 [0,1) [1,64,4,4]", (1, 64, 4, 4), "rand"),
     ("大幅值 [1,64,4,4] ×8", (1, 64, 4, 4), "big"),
+    ("极大幅值 [1,64,4,4] ×32", (1, 64, 4, 4), "huge"),
 ]
 
 
@@ -51,6 +52,8 @@ def make(kind, shape, seed):
         return torch.rand(shape, dtype=torch.float32)
     if kind == "big":
         return torch.randn(shape, dtype=torch.float32) * 8.0
+    if kind == "huge":
+        return torch.randn(shape, dtype=torch.float32) * 32.0
     return torch.randn(shape, dtype=torch.float32)
 
 
@@ -58,6 +61,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--so", required=True)
     ap.add_argument("--seeds", type=int, default=5)
+    ap.add_argument("--json", action="store_true", help="末行输出机器可读的 JSON")
     args = ap.parse_args()
 
     torch.ops.load_library(args.so)
@@ -72,6 +76,7 @@ def main():
     print("-" * 84)
 
     failures = 0
+    worst_all = 0.0
     for name, shape, kind in CASES:
         worst_d, worst_h, bad, ok_all = 0.0, 0.0, False, True
         for s in range(args.seeds):
@@ -93,6 +98,7 @@ def main():
             if not torch.allclose(ref, got, atol=ATOL, rtol=RTOL, equal_nan=False):
                 ok_all = False
         else:
+            worst_all = max(worst_all, worst_h)
             passed = ok_all and not bad and worst_h < HEADROOM_LIMIT
             if not passed:
                 failures += 1
@@ -100,6 +106,10 @@ def main():
                 name, "PASS" if passed else "FAIL", worst_d, worst_h,
                 "有!" if bad else "无"))
 
+    if args.json:
+        import json
+        print("JSON " + json.dumps({"passed": failures == 0, "failures": failures,
+                                    "max_headroom": round(worst_all, 6)}))
     print("-" * 84)
     if failures:
         print("结论: {} 个用例未通过".format(failures))

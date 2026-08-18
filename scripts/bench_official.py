@@ -131,6 +131,9 @@ def stats(samples):
     }
 
 
+LAST = {}
+
+
 def report(title, s, baseline_ms):
     print("\n[{}] 单位 us".format(title))
     print("  {:<18} {:>9} {:>9} {:>9} {:>8} {:>7}".format(
@@ -149,6 +152,10 @@ def report(title, s, baseline_ms):
     src = "实测" if "v0" in out else "固定常量"
     print("  Speedup = {:.3f}x   (v0={:.2f}us [{}], v1={:.2f}us)".format(
         v0_ms / v1_ms, v0_ms * 1e3, src, v1_ms * 1e3))
+    LAST["v1_us"] = v1_ms * 1e3
+    LAST["v0_us"] = v0_ms * 1e3
+    LAST["cv"] = out["v1"]["cv"]
+    LAST["iqr_us"] = out["v1"]["iqr"] * 1e3
     return v0_ms / v1_ms
 
 
@@ -165,6 +172,7 @@ def main():
     ap.add_argument("--baseline-ms", type=float, default=None,
                     help="固定 baseline（ms），设了就不测 v0，评估提速一倍")
     ap.add_argument("--no-filter", action="store_true")
+    ap.add_argument("--json", action="store_true", help="末行输出机器可读的 JSON")
     ap.add_argument("--self-test", action="store_true",
                     help="v1 也用参考 Model，仅验证 harness 本身")
     args = ap.parse_args()
@@ -215,6 +223,10 @@ def main():
 
     if not ok:
         print("\n正确性未通过，不再计时。")
+        if args.json:
+            import json
+            print("JSON " + json.dumps({"ok": False, "reason": "PRECISION",
+                                        "headroom": round(headroom, 6)}))
         return 1
 
     # ---- 计时 ----
@@ -235,6 +247,15 @@ def main():
     for k, v in results.items():
         print("{:<12} Speedup = {:.3f}x".format(k, v))
     print("=" * 78)
+    if args.json:
+        import json
+        print("JSON " + json.dumps({
+            "ok": True, "speedup": round(list(results.values())[-1], 5),
+            "v1_us": round(LAST.get("v1_us", 0), 3),
+            "v0_us": round(LAST.get("v0_us", 0), 3),
+            "cv": round(LAST.get("cv", 0), 5),
+            "iqr_us": round(LAST.get("iqr_us", 0), 3),
+            "headroom": round(headroom, 6)}))
     return 0
 
 
