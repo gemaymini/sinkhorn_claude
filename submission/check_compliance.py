@@ -100,7 +100,15 @@ def forward_ast(path, cls_name):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--so", default=None, help="提供则额外做运行时检查")
+    ap.add_argument("--root", default=None,
+                    help="被检查的目录（默认本文件所在目录）。"
+                         "打包流程用它检查包目录，从而无需把本脚本放进提交件")
     args = ap.parse_args()
+
+    global HERE, ROOTS
+    if args.root:
+        HERE = os.path.abspath(args.root)
+        ROOTS = [HERE, os.path.join(HERE, "src"), os.path.dirname(HERE)]
 
     v1 = os.path.join(HERE, "model_new.py")
     v0 = os.path.join(HERE, "model_ref.py")
@@ -220,6 +228,7 @@ def main():
         "环境配置文件": ["requirements.txt"],
         "运行脚本": ["build.sh", "run_auto_bench.sh"],
         "提交入口": ["model_new.py", "model_ref.py"],
+        "性能测试结果": ["results/performance.txt"],
     }
     def _find(f):
         for r in ROOTS:
@@ -235,10 +244,16 @@ def main():
             where = "（在上级目录，打包时复制进来）" if r != HERE else ""
         check(not miss, label,
               "缺少 {}".format(miss) if miss else ", ".join(fs) + where)
+    # 提交件不应包含开发期的诊断日志
     res = os.path.join(HERE, "results")
-    n_res = len(os.listdir(res)) if os.path.isdir(res) else 0
-    check(n_res > 0, "性能测试结果", "results/ 下 {} 个文件".format(n_res),
-          warn_only=True)
+    extra = []
+    if os.path.isdir(res):
+        allow = {"performance.txt", "precision.txt"}
+        extra = [f for f in os.listdir(res) if f not in allow]
+    check(not extra, "results/ 只含官方要求的测试结果",
+          "多余文件 {}".format(extra) if extra else "performance.txt / precision.txt")
+    check(not os.path.isdir(os.path.join(HERE, "scripts")),
+          "提交件不含开发工具脚本", "scripts/ 目录应只存在于开发仓库")
 
     print()
     print("=" * 78)

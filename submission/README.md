@@ -46,9 +46,8 @@
 ```bash
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
-bash build.sh              # 1. 编译，产物自动复制到本目录
-python3 check_compliance.py --so ./libsinkhorn_normalize_ops.so   # 2. 合规自检
-bash run_auto_bench.sh     # 3. 用官方原版 auto_bench.py 评测
+bash build.sh              # 1. 编译（不需要任何 -D 选项）
+bash run_auto_bench.sh     # 2. 用官方原版 auto_bench.py 评测（含正确性校验）
 ```
 
 第 3 步会自动下载官方 `auto_bench.py`；若网络受限可手动指定：
@@ -216,9 +215,9 @@ AST 过滤后 `exec`。
 
 无 NaN / Inf。**裕度占用 0.0000 意味着距离容差上限还有 5 个数量级的余量。**
 
-### 5.4 合规自检
+### 5.4 提交前自检（开发期工具，不随包提交）
 
-`check_compliance.py` 逐条对照官方规则与 `auto_bench.py` 的实际行为做 34 项检查：
+打包流程会自动运行 `check_compliance.py`，逐条对照官方规则与 `auto_bench.py` 的实际行为做 36 项检查，不通过则中止打包。检查结果只输出到终端，不写入提交件：
 
 | 类别 | 检查内容 |
 |---|---|
@@ -231,7 +230,8 @@ AST 过滤后 `exec`。
 | 构建自包含 | `CMakeLists.txt` 引用的源文件均在包内（自动跳过 `if(EXISTS)` 保护的目标） |
 | 运行时 | 算子注册成功、`forward` 真实进入 kernel（调用计数器递增）、官方容差下结果一致 |
 
-该检查是打包流程的最后一道闸，不通过则中止打包。
+另有多形状精度门禁（12 形状 × 5 seed）与时间拆解，同样只在打包时于终端输出。
+提交件本身只保留规则 4.2 要求的内容：算子代码、README、环境配置、运行脚本、性能测试结果。
 
 ### 5.5 反 fallback 自查
 
@@ -263,25 +263,21 @@ AST 过滤后 `exec`。
 
 ```
 .
-├── model_new.py                    提交文件（v1）：只定义 ModelNew / get_inputs / get_init_inputs
-├── model_ref.py                    赛题参考实现（v0）：只定义 Model / get_inputs / get_init_inputs
-├── libsinkhorn_normalize_ops.so    预编译产物，与 model_new.py 同目录
-├── build.sh                        一键编译
-├── run_auto_bench.sh               用官方原版 auto_bench.py 评测
-├── check_compliance.py             合规自检（34 项，对照规则 4.2/4.3/5.1/5.2）
+├── README.md                       本文档
 ├── requirements.txt                环境依赖
+├── model_ref.py                    赛题参考实现（auto_bench 的 --v0_file）
+├── model_new.py                    本提交（--v1_file），只定义 ModelNew
+├── build.sh                        一键编译
+├── run_auto_bench.sh               用官方 auto_bench.py 评测
+├── libsinkhorn_normalize_ops.so    编译产物，与 model_new.py 同目录
 ├── CMakeLists.txt
 ├── op_kernel/
 │   ├── sinkhorn_normalize_tiling.h     tiling 结构与共享常量
-│   └── sinkhorn_normalize_kernel_s1.asc  优化后的 kernel
-├── op_extension/                   torch 绑定层
+│   └── sinkhorn_normalize_kernel.asc   算子实现
+├── op_extension/                   PyTorch 绑定层
 ├── op_host/                        直调入口
-├── scripts/
-│   ├── check_shapes.py                 精度门禁（12 形状 × N seed）
-│   ├── bench_official.py               官方口径评测（含 AST 过滤预演）
-│   ├── s1_scaling.py                   固定开销 / 每次迭代开销拆分
-│   └── p0_ast_check.py                 提交形态验证
-└── results/                        性能与精度测试输出
+└── results/
+    └── performance.txt             性能测试结果
 ```
 
 ---
