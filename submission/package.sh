@@ -64,10 +64,10 @@ else
 
     # ------------------------------------------------------------ 3
     echo
-    echo "=== 3/5 自检（仅终端输出，不写入提交件）==="
-    hr; echo "[合规自检]"
-    "${PY}" submission/check_compliance.py --root "${OUT}" --so "${SO}" || {
-        echo "!! 合规检查未通过，已中止打包"; exit 1; }
+    echo "=== 3/5 预检与精度测试（仅终端输出，不写入提交件）==="
+    hr; echo "[合规预检：性能结果将在第 4 步生成后复查]"
+    "${PY}" submission/check_compliance.py --root "${OUT}" --preflight || {
+        echo "!! 合规预检未通过，已中止打包"; exit 1; }
     hr; echo "[精度门禁] 12 形状 × 5 seed"
     "${PY}" scripts/check_shapes.py --so "${SO}" --seeds 5 \
         | tee /tmp/sn_prec.txt || { echo "!! 精度未通过"; exit 1; }
@@ -79,16 +79,26 @@ else
     echo "=== 4/5 官方口径性能测试 -> results/performance.txt ==="
     "${PY}" scripts/bench_official.py \
         --v0-file "${OUT}/model_ref.py" --v1-file "${OUT}/model_new.py" \
-        --device npu --mode official | tee /tmp/sn_perf.txt
+        --device npu --mode official | tee /tmp/sn_perf.txt || {
+        echo "!! 性能测试未通过，已中止打包"; exit 1; }
 
-    "${PY}" - "${OUT}" /tmp/sn_perf.txt /tmp/sn_prec.txt <<'PYEOF' || true
+    if ! "${PY}" - "${OUT}" /tmp/sn_perf.txt /tmp/sn_prec.txt <<'PYEOF'
 import re, sys, datetime, platform
 out, perf, prec = sys.argv[1], sys.argv[2], sys.argv[3]
 p = open(perf, encoding="utf-8").read()
 q = open(prec, encoding="utf-8").read()
-sp = re.findall(r"Speedup = ([\d.]+)x\s+\(v0=([\d.]+)us, v1=([\d.]+)us\)", p)
+sp = re.findall(
+    r"Speedup = ([\d.]+)x\s+\(v0=([\d.]+)us"
+    r"(?:\s+\[[^]]+\])?, v1=([\d.]+)us\)", p)
 hd = re.findall(r"裕度占用\s*:\s*([\d.]+)", p)
 md = re.findall(r"最大绝对误差\s*:\s*([\d.eE+-]+)", p)
+if not sp:
+    raise SystemExit("性能输出中未找到完整的 Speedup/v0/v1 数据")
+if not hd or not md:
+    raise SystemExit("性能输出中未找到完整的精度数据")
+m = re.search(r"结论: (.+)", q)
+if not m or "全部通过" not in m.group(1):
+    raise SystemExit("多形状精度结果缺失或未通过")
 lines = [
     "SinkhornNormalize 性能测试结果",
     "=" * 60, "",
@@ -107,24 +117,29 @@ lines = [
     "性能",
     "-" * 60,
 ]
-if sp:
-    s, v0, v1 = sp[-1]
-    lines += ["  v0 参考实现 : {} us".format(v0),
-              "  v1 本提交   : {} us".format(v1),
-              "  加速比      : {}x".format(s)]
+s, v0, v1 = sp[-1]
+lines += ["  v0 参考实现 : {} us".format(v0),
+          "  v1 本提交   : {} us".format(v1),
+          "  加速比      : {}x".format(s)]
 lines += ["", "精度", "-" * 60]
-if md:
-    lines.append("  最大绝对误差 : {}".format(md[0]))
-if hd:
-    lines.append("  裕度占用     : {}   (= max|diff|/(atol+rtol*|ref|), <1 通过)".format(hd[0]))
-m = re.search(r"结论: (.+)", q)
-if m:
-    lines.append("  多形状验证   : {}  (12 个形状 x 5 个随机种子)".format(m.group(1).strip()))
+lines.append("  最大绝对误差 : {}".format(md[0]))
+lines.append("  裕度占用     : {}   (= max|diff|/(atol+rtol*|ref|), <1 通过)".format(hd[0]))
+lines.append("  多形状验证   : {}  (12 个形状 x 5 个随机种子)".format(m.group(1).strip()))
 lines += ["", "复现方式", "-" * 60,
           "  bash build.sh          # 编译", "  bash run_auto_bench.sh # 用官方 auto_bench.py 评测", ""]
 open(out + "/results/performance.txt", "w", encoding="utf-8").write("\n".join(lines))
 print("\n已写入 results/performance.txt")
 PYEOF
+    then
+        echo "!! 性能报告生成失败，已中止打包"
+        exit 1
+    fi
+    [ -s "${OUT}/results/performance.txt" ] || {
+        echo "!! results/performance.txt 为空，已中止打包"; exit 1; }
+
+    hr; echo "[最终合规检查]"
+    "${PY}" submission/check_compliance.py --root "${OUT}" --so "${SO}" || {
+        echo "!! 合规检查未通过，已中止打包"; exit 1; }
     rm -f /tmp/sn_perf.txt /tmp/sn_prec.txt
 fi
 

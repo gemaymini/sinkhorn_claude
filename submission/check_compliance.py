@@ -103,12 +103,17 @@ def main():
     ap.add_argument("--root", default=None,
                     help="被检查的目录（默认本文件所在目录）。"
                          "打包流程用它检查包目录，从而无需把本脚本放进提交件")
+    ap.add_argument("--preflight", action="store_true",
+                    help="性能测试前预检：暂不要求 results/performance.txt，"
+                         "该文件生成后必须再执行一次完整检查")
     args = ap.parse_args()
 
     global HERE, ROOTS
     if args.root:
         HERE = os.path.abspath(args.root)
-        ROOTS = [HERE, os.path.join(HERE, "src"), os.path.dirname(HERE)]
+        # 显式检查打包目录时不能回退到父目录，否则父目录中的同名文件会让
+        # 一个内容不完整的提交件误通过。
+        ROOTS = [HERE, os.path.join(HERE, "src")]
 
     v1 = os.path.join(HERE, "model_new.py")
     v0 = os.path.join(HERE, "model_ref.py")
@@ -230,6 +235,8 @@ def main():
         "提交入口": ["model_new.py", "model_ref.py"],
         "性能测试结果": ["results/performance.txt"],
     }
+    if args.preflight:
+        need_files.pop("性能测试结果")
     def _find(f):
         for r in ROOTS:
             if os.path.exists(os.path.join(r, f)):
@@ -244,6 +251,9 @@ def main():
             where = "（在上级目录，打包时复制进来）" if r != HERE else ""
         check(not miss, label,
               "缺少 {}".format(miss) if miss else ", ".join(fs) + where)
+    if args.preflight:
+        print("  [延后] 性能测试结果                               "
+              "将在性能测试完成后执行完整检查")
     # 提交件不应包含开发期的诊断日志
     res = os.path.join(HERE, "results")
     extra = []
