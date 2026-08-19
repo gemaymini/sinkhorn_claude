@@ -219,6 +219,41 @@ def main():
 
     print()
     print("=" * 78)
+    print("构建自包含性（CMakeLists 引用的源文件是否都在包内）")
+    print("=" * 78)
+    cml = None
+    for r in ROOTS:
+        c = os.path.join(r, "CMakeLists.txt")
+        if os.path.exists(c):
+            cml = c
+            break
+    if cml is None:
+        check(False, "找到 CMakeLists.txt")
+    else:
+        import re
+        txt = open(cml, encoding="utf-8").read()
+        base = os.path.dirname(cml)
+        # set(VAR path) 形式的变量，用于解析 ${VAR}
+        vs = dict(re.findall(r"set\((SN_[A-Z_]*SRC)\s+([^\s)]+)\)", txt))
+        # if(EXISTS ...) 保护块内的引用不算硬依赖
+        guarded = set(re.findall(r"if\(EXISTS\s+\$\{CMAKE_CURRENT_SOURCE_DIR\}/([^\s)]+)", txt))
+        missing = []
+        for m in re.finditer(r"add_(?:executable|library)\s*\(([^)]*)\)", txt, re.S):
+            for tok in m.group(1).split():
+                if tok.startswith("${"):
+                    tok = vs.get(tok[2:-1], tok)
+                if not re.search(r"\.(asc|cpp|cc|c)$", tok):
+                    continue
+                if tok in guarded:
+                    continue
+                if not os.path.exists(os.path.join(base, tok)):
+                    missing.append(tok)
+        check(not missing, "CMakeLists 引用的源文件均存在",
+              "缺少 {}".format(missing) if missing
+              else "已跳过 if(EXISTS) 保护的 {} 项".format(len(guarded)))
+
+    print()
+    print("=" * 78)
     print("规则 4.3 · README 必备章节")
     print("=" * 78)
     rd = os.path.join(HERE, "README.md")

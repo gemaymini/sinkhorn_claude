@@ -85,22 +85,29 @@ target_compile_options(sinkhorn_normalize PRIVATE
 target_compile_definitions(sinkhorn_normalize PRIVATE ${SN_COMMON_DEFS})
 
 # ============================================================================
-# Target 3: S1 前置 API 探针（独立可执行，不依赖 torch）
+# Target 3: API 探针（开发诊断用，独立可执行，不依赖 torch）
+#
+# 提交件不包含 probe/ 目录，因此这里必须做存在性判断——否则 CMake 会在 generate
+# 阶段就因 "No SOURCES given to target" 失败，连带 .so 也编不出来。
 # ============================================================================
 
-add_executable(probe_sinkhorn probe/probe_main.asc)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/probe/probe_main.asc)
+    add_executable(probe_sinkhorn probe/probe_main.asc)
 
-target_link_libraries(probe_sinkhorn PRIVATE
-    tiling_api register platform unified_dlog dl m graph_base
-)
+    target_link_libraries(probe_sinkhorn PRIVATE
+        tiling_api register platform unified_dlog dl m graph_base
+    )
 
-target_include_directories(probe_sinkhorn PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/probe
-)
+    target_include_directories(probe_sinkhorn PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/probe
+    )
 
-target_compile_options(probe_sinkhorn PRIVATE
-    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-2201>
-)
+    target_compile_options(probe_sinkhorn PRIVATE
+        $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-2201>
+    )
+else()
+    message(STATUS "probe/ 不存在，跳过 probe_sinkhorn 目标（提交件布局）")
+endif()
 
 # ============================================================================
 # Target 2: TORCH_LIBRARY module (libsinkhorn_normalize_ops.so)

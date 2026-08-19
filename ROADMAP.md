@@ -1,5 +1,7 @@
 # 后续工作路线图
 
+> GA 设计详解见 [GA_DESIGN.md](GA_DESIGN.md)
+>
 > 记录时点：提交件 v1 已可打包（v1=158.55us，官方口径 **9.86x**，精度裕度占用 0.0000）
 > 完整实验设计见 [EXPERIMENT_PLAN.md](EXPERIMENT_PLAN.md)，本文只列**尚未完成**的部分。
 
