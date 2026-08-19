@@ -22,18 +22,30 @@ PKG="【2026KernelSwift算子创新大赛】-${NAME}-Task03_sinkhorn-${UID_STR}"
 OUT="${ROOT}/dist/${PKG}"
 rm -rf "${OUT}" && mkdir -p "${OUT}/results"
 
-echo "=== 0/4 确认生效的构建配置 ==="
-# build.sh 不带任何 -D，用的就是 CMakeLists.txt 里的默认值。
-# 若跑过 GA，先用 ga/apply_best.py 把最优基因写进默认值，再打包。
-CFG=$(grep -E "^set\(SN_[A-Z0-9_]+[[:space:]]+[0-9]+" CMakeLists.txt \
-      | sed -E 's/^set\((SN_[A-Z0-9_]+)[[:space:]]+([0-9]+).*/  \1=\2/')
+echo "=== 0/4 确认写死版源码为最新 ==="
+# 提交件用的是 submission/src/ 下的写死版：算子配置已固化，不含任何编译期开关。
+# 它由 gen_release_src.py 从开发版（带 -D 开关）机械生成，配置取自 GA 搜索确认的最优解。
+CFG=$("${PY:-python3}" - <<'PYEOF'
+import sys
+sys.path.insert(0, "submission")
+from gen_release_src import CONFIG
+for k, v in CONFIG.items():
+    print("  {}={}".format(k, v))
+PYEOF
+)
 echo "${CFG}"
+echo "  （已固化进源码，提交件的 CMakeLists 不含任何 -D 选项）"
 mkdir -p "${OUT}/results"
-{ echo "打包时生效的构建配置（来自 CMakeLists.txt 默认值）"; echo; echo "${CFG}"; } \
+{ echo "算子固化配置（由 GA 搜索确认为最优，已写死进源码）"; echo; echo "${CFG}"; } \
     > /tmp/sn_build_config.txt
 
-echo "=== 1/4 收集源码 ==="
-cp -r op_kernel op_extension op_host CMakeLists.txt "${OUT}/"
+echo "=== 1/4 收集源码（写死版，无任何 -D 编译选项）==="
+# submission/src/ 由 gen_release_src.py 从开发版机械生成，
+# verify_release_src.py 校验过两者的 AscendC 调用序列完全一致。
+[ -d submission/src ] || { echo "!! submission/src 不存在，请先运行 python3 submission/gen_release_src.py"; exit 1; }
+"${PY:-python3}" submission/verify_release_src.py >/dev/null 2>&1 \
+    || { echo "!! 写死版与开发版逻辑不一致，请检查 submission/verify_release_src.py 的输出"; exit 1; }
+cp -r submission/src/. "${OUT}/"
 find "${OUT}" \( -name '*.orig' -o -name '*.log' -o -name '__pycache__' \) \
      -exec rm -rf {} + 2>/dev/null || true
 cp submission/model_new.py submission/model_ref.py submission/build.sh \
@@ -44,8 +56,6 @@ for f in check_shapes.py bench_official.py p0_ast_check.py s1_scaling.py \
          p0_host_breakdown.py golden.py; do
     [ -f "scripts/$f" ] && cp "scripts/$f" "${OUT}/scripts/"
 done
-# 不需要的诊断变体源文件一并带上原 kernel 作为对照，便于评委复现 A/B
-cp op_kernel/sinkhorn_normalize_kernel.asc "${OUT}/op_kernel/" 2>/dev/null || true
 cp /tmp/sn_build_config.txt "${OUT}/results/build_config.txt" 2>/dev/null || true
 echo "    源码已复制"
 

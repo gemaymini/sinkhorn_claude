@@ -13,7 +13,7 @@
 |---|---|---|
 | P0 host 层 + 提交形态验证 | ✅ | 同步 memcpy 与设备查询去除，+17% |
 | P1 kernel 重写（S1 系列） | ✅ | 5.79x → 9.86x，时间构成已完全拆清 |
-| **提交件 v1** | ✅ | `submission/`，含 33 项合规自检 + 官方 auto_bench 复核脚本 |
+| **提交件 v1** | ✅ | `submission/`，含 34 项合规自检 + 官方 auto_bench 复核脚本 |
 | P2' GA 框架 | ✅ | `ga/`，mock 上端到端跑通 |
 | **P3' GA 搜索** | ⏳ **下一步** | `bash ga/run_ga.sh 60`，3 个 seed，约 2.5 小时机时 |
 | P4' 紧凑布局骨架 | ❌ | 唯一剩余的大杠杆（+19%） |
@@ -158,13 +158,19 @@ FunSearch / AlphaEvolve 范式。变异 prompt = 当前源码 + profiling 摘要
 ga/runs/*.sqlite          GA 搜索结果（快档保真度，排名可信、数值不可直接采信）
         │
         ├─ python ga/apply_best.py            只看：列出候选、全档复验、给结论
-        ├─ python ga/apply_best.py --apply    确认后写入 CMakeLists.txt 默认值
+        ├─ python ga/apply_best.py --apply    确认后写入 CMakeLists.txt 默认值（开发版）
         │
-CMakeLists.txt 默认值      <- build.sh 不带任何 -D，用的就是这里
+CMakeLists.txt 默认值 = submission/gen_release_src.py 的 CONFIG
         │
-        └─ bash submission/package.sh "队伍名" "UID"
-                打包前会打印生效配置并存进 results/build_config.txt
+        ├─ python submission/gen_release_src.py    机械生成写死版到 submission/src/
+        ├─ python submission/verify_release_src.py 校验调用序列与开发版一致
+        │
+        └─ bash submission/package.sh "队伍名" "UID"    打包 submission/src/
 ```
+
+**GA 搜索已完成，结论是初始配置即最优。** 因此提交件不再带任何 `-D` 编译选项：
+`submission/src/` 是从开发版机械消解 `#if` 后的写死版，评委 `cmake` 一条命令即可构建。
+若日后 GA 或手工调优找到更好的配置，改 `gen_release_src.py` 的 `CONFIG` 后重新生成即可。
 
 **`apply_best.py` 的两道保险**：候选必须用**全档**（精度 5 seed + warmup200/repeat500，
 3 个独立进程取中位数）重新评测；且必须比当前默认值领先 **>1.5%** 才替换 ——
@@ -172,7 +178,7 @@ v1 的测量 CV 约 2%，采纳噪声赢家会让提交件比已验证的配置�
 
 - [ ] 用最优配置重新 `bash submission/package.sh "队伍名" "UID"`
 - [ ] hold-out 复验：20 个未在调优中出现过的 seed + 全部形状
-- [ ] `bash submission/package.sh "队伍名" "UID"` —— 内置 33 项合规自检，不通过会中止打包
+- [ ] `bash submission/package.sh "队伍名" "UID"` —— 内置 34 项合规自检，不通过会中止打包
 - [ ] `bash run_auto_bench.sh` —— 用**官方原版** auto_bench.py 复核（不是我们复刻的版本）
 - [ ] 复核提交规范
   - [ ] 邮件主题 `【2026KernelSwift算子创新大赛】-<队伍名>-赛道二-<UID>`

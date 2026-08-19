@@ -218,7 +218,7 @@ AST 过滤后 `exec`。
 
 ### 5.4 合规自检
 
-`check_compliance.py` 逐条对照官方规则与 `auto_bench.py` 的实际行为做 33 项检查：
+`check_compliance.py` 逐条对照官方规则与 `auto_bench.py` 的实际行为做 34 项检查：
 
 | 类别 | 检查内容 |
 |---|---|
@@ -268,7 +268,7 @@ AST 过滤后 `exec`。
 ├── libsinkhorn_normalize_ops.so    预编译产物，与 model_new.py 同目录
 ├── build.sh                        一键编译
 ├── run_auto_bench.sh               用官方原版 auto_bench.py 评测
-├── check_compliance.py             合规自检（33 项，对照规则 4.2/4.3/5.1/5.2）
+├── check_compliance.py             合规自检（34 项，对照规则 4.2/4.3/5.1/5.2）
 ├── requirements.txt                环境依赖
 ├── CMakeLists.txt
 ├── op_kernel/
@@ -286,31 +286,28 @@ AST 过滤后 `exec`。
 
 ---
 
-## 8. 构建配置
-
-`build.sh` 不带任何 `-D` 参数，使用 `CMakeLists.txt` 中的默认值，该默认值已对齐到
-实测最优配置。打包时生效的完整配置记录在 `results/build_config.txt`。
-
-主要开关（全部可用 `-D` 覆盖，便于复现 A/B）：
-
-| 开关 | 默认 | 含义 |
-|---|---|---|
-| `SN_KERNEL_VARIANT` | 1 | 1 = S1 批量化 kernel，0 = 原 per-matrix 实现（对照） |
-| `SN_TILE_TARGET` | 64 | 每核矩阵数 |
-| `SN_S1_DIV_MODE` | 1 | 1 = `Div`，0 = `Reciprocal` + Newton-Raphson |
-| `SN_S1_USE_MAX` | 1 | softmax 减行最大值 |
-| `SN_S1_COLNORM_WIDE` | 1 | ColNormalize 每 repeat 处理 8 个矩阵 |
-| `SN_S1_BARRIER_MODE` | 1 | 去掉冗余 `PipeBarrier<PIPE_V>` |
-| `SN_S1_EPS_MODE` | 1 | eps 向量纯算术构造 |
-| `SN_TILING_MODE` | 1 | 静态缓存 tiling |
-| `SN_CORE_QUERY` | 1 | 缓存设备核数 |
-
-复现对照实验示例：
+## 8. 构建
 
 ```bash
-cmake -S . -B build_v0 -DSN_KERNEL_VARIANT=0   # 原始实现
-cmake -S . -B build_a  -DSN_TILING_MODE=0      # 关掉 host 层优化
+cmake -S . -B build && cmake --build build --target sinkhorn_normalize_ops
 ```
+
+**不需要任何 `-D` 选项。** 算子配置已全部固化进源码：
+
+| 决策 | 取值 | 依据 |
+|---|---|---|
+| 除法实现 | `Div` | 硬件 `Reciprocal` 只有 9 位精度；`Div` 既更准又更快 |
+| softmax 减最大值 | 是 | 否则 `randn×32` 时 `exp` 溢出成 inf |
+| ColNormalize 宽度 | 8 矩阵/repeat | `mask=64` + `blkStride=4`，repeat 数从 456 降到 64 |
+| `PipeBarrier<PIPE_V>` | 不插 | 同 pipe 内本就按序发射，跨 pipe 另有 `SetFlag`/`WaitFlag` |
+| eps 向量 | 算术构造 | 从 GM 读取版实测独占 20.8us |
+| CopyOut | 单次批量 `DataCopyPad` | |
+| 每核矩阵数 | 64 | 实测 <64 明显更慢，64 与 128 持平 |
+| tiling / 核数 | 静态缓存 | 去掉每次调用的同步 `memcpy` 与设备查询，+17% |
+
+开发阶段这些是编译期开关，用遗传算法在 4480 个有效配置点上搜索过；
+搜索确认上表即最优解后，**开关已消解、死代码已删除**，提交件只保留最终实现。
+`op_kernel/sinkhorn_normalize_kernel.asc` 的文件头注释逐条记录了每个决策的实测依据。
 
 ## 9. 原创声明
 

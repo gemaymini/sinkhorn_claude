@@ -15,8 +15,11 @@ import sys
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# 源码布局下算子代码在仓库根目录，打包后在包内根目录——两种都支持
-ROOTS = [HERE, os.path.dirname(HERE)]
+# 三种布局都支持：
+#   打包后        算子代码在包内根目录（HERE）
+#   开发仓库      写死版在 submission/src/，开发版（带开关）在仓库根目录
+# 顺序即优先级：先看包内，再看写死版，最后才是仓库根目录
+ROOTS = [HERE, os.path.join(HERE, "src"), os.path.dirname(HERE)]
 
 
 def _stub_torch_npu_if_absent():
@@ -271,6 +274,34 @@ def main():
         check(not missing, "CMakeLists 引用的源文件均存在",
               "缺少 {}".format(missing) if missing
               else "已跳过 if(EXISTS) 保护的 {} 项".format(len(guarded)))
+
+    print()
+    print("=" * 78)
+    print("构建可复现性（提交件不应含任何编译期配置开关）")
+    print("=" * 78)
+    import re as _re
+    srcs, sw = [], []
+    for r in ROOTS:
+        for sub in ("op_kernel", "op_extension", "op_host"):
+            d = os.path.join(r, sub)
+            if os.path.isdir(d):
+                srcs += [os.path.join(d, f) for f in os.listdir(d)]
+        c = os.path.join(r, "CMakeLists.txt")
+        if os.path.exists(c):
+            srcs.append(c)
+        if srcs:
+            break
+    for f in srcs:
+        try:
+            t = open(f, encoding="utf-8").read()
+        except Exception:                                  # noqa: BLE001
+            continue
+        for m in _re.finditer(r"\bSN_(?:S1_[A-Z_]+|KERNEL_VARIANT|TILING_MODE|"
+                              r"CORE_QUERY|DIAG)\b", t):
+            sw.append("{}:{}".format(os.path.basename(f), m.group(0)))
+    check(not sw, "源码与 CMakeLists 无编译期开关",
+          "残留 {}".format(sorted(set(sw))[:4]) if sw
+          else "算子配置已固化，cmake 无需任何 -D")
 
     print()
     print("=" * 78)

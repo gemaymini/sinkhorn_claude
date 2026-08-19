@@ -44,7 +44,7 @@
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 ```
 
-**打包提交件**（内置编译 → 精度门禁 → 官方口径评测 → 33 项合规自检）
+**打包提交件**（内置编译 → 精度门禁 → 官方口径评测 → 34 项合规自检）
 
 ```bash
 bash submission/package.sh "队伍名" "UID"

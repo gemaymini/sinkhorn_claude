@@ -1,0 +1,21 @@
+/**
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * SPDX-License-Identifier: CANN Open Software License Agreement Version 2.0
+ */
+
+#ifndef OPS_H
+#define OPS_H
+
+#include <cstdint>
+#include <torch/extension.h>
+
+namespace ascend_kernel {
+
+at::Tensor sinkhorn_normalize_torch(const at::Tensor& x, int64_t repeat, double eps);
+
+// 反作弊自查：返回自定义 kernel 被真实调用的累计次数
+uint64_t sinkhorn_normalize_call_count();
+
+} // namespace ascend_kernel
+
+#endif // OPS_H
