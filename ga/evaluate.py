@@ -15,6 +15,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -116,15 +117,20 @@ def real_eval(g, py, workdir, fast=True):
         return dict(ok=False, tag="PRECISION_FAIL",
                     headroom=j.get("max_headroom", 9.9))
 
-    env = dict(os.environ, SINKHORN_OPS_SO=so)
+    # model_new.py 固定从自身所在目录加载 .so，所以把它复制到该个体的构建目录，
+    # 使每个个体都用自己那份 .so（构建目录评估完即删，副本一并清理）
+    shutil.copy(os.path.join(ROOT, "submission", "model_new.py"), d)
+    v1_file = os.path.join(d, "model_new.py")
     try:
         p = subprocess.run([py, "scripts/bench_official.py",
-                            "--module", "submission/model_new.py", "--device", "npu",
+                            "--v0-file", "submission/model_ref.py",
+                            "--v1-file", v1_file,
+                            "--device", "npu",
                             "--mode", "interleaved",
                             "--warmup", "60" if fast else "200",
                             "--repeat", "180" if fast else "500",
                             "--baseline-ms", str(BASELINE_US / 1000.0), "--json"],
-                           cwd=ROOT, env=env, timeout=RUN_TIMEOUT,
+                           cwd=ROOT, timeout=RUN_TIMEOUT,
                            capture_output=True, text=True)
         b = _json_line(p.stdout + p.stderr)
     except subprocess.TimeoutExpired:

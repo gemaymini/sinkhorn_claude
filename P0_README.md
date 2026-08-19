@@ -43,8 +43,9 @@ bash scripts/run_p0.sh
 所以本文件顶层不含任何可执行语句，`.so` 加载全在 `ModelNew.__init__` 里完成。
 加载失败会抛 `RuntimeError`，**不会静默 fallback 到 PyTorch 内置算子**。
 
-`.so` 路径查找：`SINKHORN_OPS_SO` → `SINKHORN_OPS_DIR` → cwd 及其 `build/` →
-本文件所在目录 → `sys.path`。**最稳的做法是显式设 `SINKHORN_OPS_SO`。**
+`.so` 固定从 `model_new.py` 所在目录加载，无环境变量、无多路径回退。
+调用方（`run_p0.sh` / `run_s1.sh` / `ga/evaluate.py`）会把 `model_new.py`
+复制到各自的构建目录，使 `.so` 始终在它旁边。
 
 ## 脚本清单
 
@@ -68,12 +69,32 @@ bash scripts/run_p0.sh
 拿到 msprof 的纯 kernel 时间后，完整拆解就齐了：
 `M1 ≈ host(M2) + kernel(msprof) + launch/sync 残差`。
 
-## 已在 Mac 上验证
+## P0 实测结果（已完成）
 
-- `p0_ast_check.py`：提交文件 13 个顶层节点全部保留，仅 docstring 被丢弃（无害）；
-  过滤后 exec 成功、`Model/ModelNew/get_inputs/get_init_inputs` 齐全；
-  缺 `.so` 时正确抛 `RuntimeError`。
-- `bench_official.py --device cpu --self-test`：harness 自洽（speedup ≈ 1.0x）。
-- `p0_host_breakdown.py --device cpu`：各项测量与推导逻辑正常。
+两次独立运行的汇总：
 
-C++ 侧只做了静态审查，**未编译验证**——服务器上第一次 `run_p0.sh` 会暴露编译问题。
+| 指标 | `orig`（每次同步 memcpy + 查核数） | `opt`（静态缓存） | 差值 |
+|---|---|---|---|
+| M2 host 端耗时（不 sync） | 114.28 / 119.34us | **39.78 / 40.02us** | **−76.9us（−66%）** |
+| M1 裸算子 + sync | 301.41 / 309.74us | **237.19 / 240.31us** | **−66.8us（−21.9%）** |
+| 官方口径 speedup | 3.834x / 4.190x | 4.629x / 4.741x | **+13~21%** |
+
+那个每次调用的同步 `aclrtMemcpy` 一项就值约 **17%**（两次均值），零精度风险。
+
+**时间地板**（决定一切目标的上限）：
+
+| 测量项 | 耗时 |
+|---|---|
+| M3 `torch.npu.synchronize()` 空转 | 16.5~17.5us |
+| M4 `torch.empty_like` + sync | 30.3~31.6us |
+| **M5 单个最简 NPU 算子往返 + sync** | **~56us ← 硬地板** |
+
+三条关键工程结论：
+
+1. **`M1` 是最稳的判据**（两次运行差 0.7%），而 speedup 因 baseline 跨进程漂移 ±11% 反而不稳
+2. **Python wrapper 开销是噪声**：M6 − M1 在 `orig` 为 −6.48us、`opt` 为 +8.19us，一正一负
+3. **`.so` 加载**：官方 `load_ks_module()` 确实设置 `module.__file__`，
+   所以 `.so` 与 `model_new.py` 同目录即可被找到，无需环境变量
+
+> P0 之后的进展（S1 kernel 重写等）见 [EXPERIMENT_PLAN.md](EXPERIMENT_PLAN.md) §2.3 与 §10。
+> 当前成绩：v1 = 158.55us，官方口径 9.86x。

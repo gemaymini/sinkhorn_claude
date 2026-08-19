@@ -12,6 +12,8 @@ P0 实测发现 baseline (v0) 在同一台机器上跨进程波动达 ±6%（117
 交替测量把两者切成 rounds 段轮流测，能抵消慢漂移，A/B 时的判别力显著更高。
 最终对外报数用 --mode official，调优内部对比用 --mode interleaved（默认）。
 
+与官方一致，v0 / v1 是**两个独立文件**：v0 只需 Model，v1 只需 ModelNew。
+
 用法：
     python scripts/bench_official.py                          # 交替模式，默认
     python scripts/bench_official.py --mode official          # 严格官方口径
@@ -161,7 +163,10 @@ def report(title, s, baseline_ms):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--module", default="submission/model_new.py")
+    ap.add_argument("--v0-file", dest="v0_file", default="submission/model_ref.py",
+                    help="参考实现文件，须定义 Model / get_inputs / get_init_inputs")
+    ap.add_argument("--v1-file", dest="v1_file", default="submission/model_new.py",
+                    help="提交文件，须定义 ModelNew / get_inputs / get_init_inputs")
     ap.add_argument("--device", default="npu", choices=["npu", "cuda", "cpu"])
     ap.add_argument("--warmup", type=int, default=200)
     ap.add_argument("--repeat", type=int, default=500)
@@ -182,20 +187,29 @@ def main():
     else:
         install_npu_stub()
 
-    ns = load_module(args.module, apply_filter=not args.no_filter)
-    init_args = ns["get_init_inputs"]()
+    # 与官方 build_case() 一致：Model 只从 v0 取、ModelNew 只从 v1 取
+    ns0 = load_module(args.v0_file, apply_filter=not args.no_filter)
+    ns1 = load_module(args.v1_file, apply_filter=not args.no_filter)
 
     set_seed(args.seed)
-    inputs = [t.to(args.device) if isinstance(t, torch.Tensor) else t
-              for t in ns["get_inputs"]()]
+    init0 = ns0["get_init_inputs"]() or []
+    set_seed(args.seed)
+    init1 = ns1["get_init_inputs"]() or []
 
-    v0_model = ns["Model"](*init_args).to(args.device)
-    v1_model = (ns["Model"](*init_args) if args.self_test
-                else ns["ModelNew"](*init_args)).to(args.device)
+    set_seed(args.seed)
+    # 官方会把 v1 的输入整个替换成 v0 输入的克隆，这里同样只用 v0 的
+    inputs = [t.to(args.device) if isinstance(t, torch.Tensor) else t
+              for t in ns0["get_inputs"]()]
+
+    v0_model = ns0["Model"](*init0).to(args.device)
+    v1_model = (ns0["Model"](*init0) if args.self_test
+                else ns1["ModelNew"](*init1)).to(args.device)
 
     print("=" * 78)
     print("官方口径评测  device={}  mode={}  warmup={}  repeat={}  seed={}".format(
         args.device, args.mode, args.warmup, args.repeat, args.seed))
+    print("  v0 参考: {}".format(args.v0_file))
+    print("  v1 提交: {}".format(args.v1_file))
     print("  输入: {}".format([tuple(t.shape) for t in inputs
                                if isinstance(t, torch.Tensor)]))
     print("=" * 78)

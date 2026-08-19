@@ -63,8 +63,10 @@ for v in orig opt; do
     echo "#################### 变体: ${v} ####################"
     ${PY} scripts/p0_host_breakdown.py --so "${SO}" --tag "${v}"
     echo
-    SINKHORN_OPS_SO="${SO}" ${PY} scripts/bench_official.py \
-        --module submission/model_new.py --device npu --mode both
+    cp submission/model_new.py "$(dirname "${SO}")/"   # .so 必须在 model_new.py 旁边
+    ${PY} scripts/bench_official.py \
+        --v0-file submission/model_ref.py --v1-file "$(dirname "${SO}")/model_new.py" \
+        --device npu --mode both
 done
 
 hr

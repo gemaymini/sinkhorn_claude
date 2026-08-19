@@ -1,4 +1,13 @@
-"""对照实验分析：收敛曲线、算法比较、逐基因消融。"""
+"""GA 搜索结果分析。
+
+产出：
+  1. 总览（评估数、成功率、缓存命中、最优）
+  2. 各 seed 的结果与稳定性
+  3. 收敛曲线（best-so-far vs 真实评估次数）
+  4. 最优个体的完整基因
+  5. 逐基因分析：精确单基因消融 + 边际最优（兜底，总能算出来）
+  6. 结局分布（编译/精度/运行失败各多少）
+"""
 
 import collections
 import glob
@@ -15,23 +24,19 @@ import genome as G  # noqa: E402
 def load(db):
     con = sqlite3.connect(db)
     rows = con.execute(
-        "SELECT ts, ok, fitness, v1_us, genome, tag FROM evals ORDER BY ts").fetchall()
+        "SELECT ts, ok, fitness, v1_us, genome, tag, headroom "
+        "FROM evals ORDER BY ts").fetchall()
     con.close()
     curve, best = [], 0.0
-    for i, (_, ok, f, _, _, _) in enumerate(rows, 1):
-        best = max(best, f if ok else 0.0)
+    for r in rows:
+        best = max(best, r[2] if r[1] else 0.0)
         curve.append(best)
     return rows, curve
 
 
-def mannwhitney(a, b):
-    """小样本 Mann-Whitney U 的 U 统计量与效应量（不查表，只报数值）。"""
-    n1, n2 = len(a), len(b)
-    if n1 == 0 or n2 == 0:
-        return 0.0, 0.5
-    u = sum(1 for x in a for y in b if x > y) + 0.5 * sum(
-        1 for x in a for y in b if x == y)
-    return u, u / (n1 * n2)          # 后者是"a 优于 b"的概率，0.5 表示无差异
+def bar(frac, width=28):
+    n = int(round(frac * width))
+    return "█" * n + "·" * (width - n)
 
 
 def main():
@@ -39,106 +44,145 @@ def main():
     dbs = sorted(glob.glob(os.path.join(root, "*.sqlite")))
     if not dbs:
         print("没找到结果: {}/*.sqlite".format(root))
+        print("（未完成的运行会留下 .sqlite.partial，跑完才改名）")
         return 1
 
-    by_algo = collections.defaultdict(list)
+    runs = []          # (名字, rows, curve)
     all_rows = []
     for db in dbs:
-        algo = os.path.basename(db).split("_s")[0]
         rows, curve = load(db)
-        by_algo[algo].append((curve, rows))
+        runs.append((os.path.basename(db).replace(".sqlite", ""), rows, curve))
         all_rows += rows
 
-    # ---------------- 最终结果 ----------------
-    print("=" * 82)
-    print("算法比较（同预算，按真实评估次数计）")
-    print("=" * 82)
-    print("{:<10} {:>8} {:>22} {:>14} {:>12}".format(
-        "算法", "seed数", "最优 fitness (mean±std)", "最优 v1(us)", "AUC"))
-    print("-" * 82)
-    finals = {}
-    for algo in ("ga", "tpe", "local", "random"):
-        if algo not in by_algo:
-            continue
-        bests = [c[-1] for c, _ in by_algo[algo] if c]
-        aucs = [sum(c) / len(c) for c, _ in by_algo[algo] if c]
-        if not bests:
-            print("{:<10} {:>8} {:>22}".format(algo, 0, "无数据（该算法未跑或全部失败）"))
-            continue
-        v1s = []
-        for _, rows in by_algo[algo]:
-            ok = [r for r in rows if r[1]]
-            if ok:
-                v1s.append(min(r[3] for r in ok))
-        finals[algo] = bests
-        print("{:<10} {:>8} {:>13.4f} ±{:<7.4f} {:>14.2f} {:>12.4f}".format(
-            algo, len(bests), st.mean(bests),
-            st.pstdev(bests) if len(bests) > 1 else 0.0,
-            min(v1s) if v1s else 0.0, st.mean(aucs)))
-
-    # ---------------- 显著性 ----------------
-    if "ga" in finals:
-        print("\n{:<28} {:>8} {:>28}".format("GA vs", "U", "P(GA 更优)"))
-        print("-" * 66)
-        for other in ("tpe", "local", "random"):
-            if other in finals:
-                u, p = mannwhitney(finals["ga"], finals[other])
-                print("{:<28} {:>8.1f} {:>28.2f}".format(other, u, p))
-        print("(n=3 太小，无法给出可靠 p 值；这里报效应量本身)")
-
-    # ---------------- 收敛曲线 ----------------
-    print("\n" + "=" * 82)
-    print("收敛曲线（best-so-far，各 seed 平均）")
-    print("=" * 82)
-    maxlen = max(len(c) for cs in by_algo.values() for c, _ in cs)
-    marks = [m for m in (1, 5, 10, 20, 30, 40, 50, 60, 80, 100) if m <= maxlen]
-    print("{:<10} {}".format("评估次数", "".join("{:>9}".format(m) for m in marks)))
-    print("-" * 82)
-    for algo in ("ga", "tpe", "local", "random"):
-        if algo not in by_algo:
-            continue
-        row = []
-        for m in marks:
-            vals = [c[min(m, len(c)) - 1] for c, _ in by_algo[algo] if c]
-            row.append("{:>9.3f}".format(st.mean(vals)) if vals else "{:>9}".format("-"))
-        print("{:<10} {}".format(algo, "".join(row)))
-
-    # ---------------- 健康度 ----------------
-    tags = collections.Counter(r[5] for r in all_rows)
-    print("\n各结局: {}".format(dict(tags)))
-
-    # ---------------- 逐基因消融 ----------------
     ok_rows = [r for r in all_rows if r[1]]
+
+    # ---------------- 1. 总览 ----------------
+    print("=" * 84)
+    print("总览")
+    print("=" * 84)
+    tags = collections.Counter(r[5] for r in all_rows)
+    n = len(all_rows)
+    print("  结果库          : {} 个 ({})".format(
+        len(dbs), ", ".join(x[0] for x in runs)))
+    print("  真实评估总数    : {}".format(n))
+    print("  成功 / 成功率   : {} / {:.1%}".format(len(ok_rows), len(ok_rows) / max(1, n)))
+    if ok_rows:
+        best = max(ok_rows, key=lambda r: r[2])
+        print("  全局最优 fitness: {:.4f}   v1={:.2f}us   裕度占用={:.5f}".format(
+            best[2], best[3], best[6]))
+        print("  全局最优基因组  : {}".format(G.label(json.loads(best[4]))))
+
+    print("\n  各结局分布:")
+    for t, c in tags.most_common():
+        print("    {:<18} {:>4}  {:>6.1%}  {}".format(t, c, c / n, bar(c / n)))
+
     if not ok_rows:
-        print("\n没有成功个体，跳过消融")
-        return 0
-    best = max(ok_rows, key=lambda r: r[2])
+        print("\n没有成功个体，后续分析跳过。")
+        return 1
+
+    # ---------------- 2. 各 seed ----------------
+    print()
+    print("=" * 84)
+    print("各 seed 的结果（看 GA 稳不稳）")
+    print("=" * 84)
+    print("  {:<12} {:>8} {:>12} {:>12} {:>10}  {}".format(
+        "运行", "评估数", "最优fitness", "最优v1(us)", "成功率", "最优基因组"))
+    print("  " + "-" * 80)
+    finals = []
+    for name, rows, curve in runs:
+        okr = [r for r in rows if r[1]]
+        if not okr:
+            print("  {:<12} {:>8} {:>12}".format(name, len(rows), "全部失败"))
+            continue
+        b = max(okr, key=lambda r: r[2])
+        finals.append(b[2])
+        print("  {:<12} {:>8} {:>12.4f} {:>12.2f} {:>9.0%}  {}".format(
+            name, len(rows), b[2], b[3], len(okr) / len(rows),
+            G.label(json.loads(b[4]))))
+    if len(finals) > 1:
+        print("  " + "-" * 80)
+        print("  最优 fitness 跨 seed: mean={:.4f}  std={:.4f}  极差={:.4f} ({:.2%})".format(
+            st.mean(finals), st.pstdev(finals), max(finals) - min(finals),
+            (max(finals) - min(finals)) / st.mean(finals)))
+
+    # ---------------- 3. 收敛曲线 ----------------
+    print()
+    print("=" * 84)
+    print("收敛曲线（best-so-far vs 真实评估次数）")
+    print("=" * 84)
+    maxlen = max(len(c) for _, _, c in runs)
+    marks = [m for m in (1, 4, 8, 12, 16, 20, 30, 40, 50, 60, 80, 100) if m <= maxlen]
+    if maxlen not in marks:
+        marks.append(maxlen)
+    print("  {:<12} {}".format("评估次数", "".join("{:>8}".format(m) for m in marks)))
+    print("  " + "-" * 80)
+    for name, _, curve in runs:
+        row = "".join("{:>8.3f}".format(curve[min(m, len(curve)) - 1]) for m in marks)
+        print("  {:<12} {}".format(name, row))
+    if len(runs) > 1:
+        avg = []
+        for m in marks:
+            vals = [c[min(m, len(c)) - 1] for _, _, c in runs if c]
+            avg.append("{:>8.3f}".format(st.mean(vals)))
+        print("  " + "-" * 80)
+        print("  {:<12} {}".format("平均", "".join(avg)))
+
+    # ---------------- 4. 最优个体 ----------------
     bg = json.loads(best[4])
-    print("\n" + "=" * 82)
-    print("逐基因消融：固定最优个体，逐位换成其它取值后的最好 fitness")
-    print("最优个体 {}   fitness={:.4f}  v1={:.2f}us".format(
-        G.label(bg), best[2], best[3]))
-    print("=" * 82)
-    print("{:<14} {:<8} {:>12} {:>12} {:>10}".format(
-        "基因", "最优取值", "换掉后最好", "跌幅", "样本数"))
-    print("-" * 82)
-    idx = collections.defaultdict(list)
-    for r in ok_rows:
-        idx[json.dumps(json.loads(r[4]), sort_keys=True)].append(r[2])
-    rank = []
+    print()
+    print("=" * 84)
+    print("最优个体")
+    print("=" * 84)
+    print("  {:<16} {:<8} {}".format("基因", "取值", "CMake 选项"))
+    print("  " + "-" * 60)
     for k in G.NAMES:
-        alt = []
-        for r in ok_rows:
-            g = json.loads(r[4])
-            if g[k] != bg[k] and all(g[o] == bg[o] for o in G.NAMES if o != k):
-                alt.append(r[2])
+        print("  {:<16} {:<8} -D{}={}".format(k, bg[k], G.CMAKE_OPT[k], bg[k]))
+    print("\n  fitness={:.4f}  v1={:.2f}us  裕度占用={:.5f}".format(
+        best[2], best[3], best[6]))
+
+    # ---------------- 5. 逐基因分析 ----------------
+    print()
+    print("=" * 84)
+    print("逐基因消融（固定最优个体，只改一位）")
+    print("=" * 84)
+    exact = []
+    for k in G.NAMES:
+        alt = [r[2] for r in ok_rows
+               if (g := json.loads(r[4]))[k] != bg[k]
+               and all(g[o] == bg[o] for o in G.NAMES if o != k)]
         if alt:
-            drop = best[2] - max(alt)
-            rank.append((drop, k, bg[k], max(alt), len(alt)))
-    for drop, k, v, mx, n in sorted(rank, reverse=True):
-        print("{:<14} {:<8} {:>12.4f} {:>12.4f} {:>10}".format(k, v, mx, drop, n))
-    if not rank:
-        print("（缓存里还没有只差一位的邻居个体，跑完完整预算后会有）")
+            exact.append((best[2] - max(alt), k, bg[k], max(alt), len(alt)))
+    if exact:
+        print("  {:<16} {:<8} {:>12} {:>12} {:>8}".format(
+            "基因", "最优取值", "改掉后最好", "跌幅", "样本"))
+        print("  " + "-" * 60)
+        for drop, k, v, mx, cnt in sorted(exact, reverse=True):
+            print("  {:<16} {:<8} {:>12.4f} {:>12.4f} {:>8}".format(k, v, mx, drop, cnt))
+    else:
+        print("  缓存里没有「只差一位」的邻居个体，无法做精确消融。")
+        print("  改看下面的边际最优。")
+
+    print()
+    print("=" * 84)
+    print("边际最优（每个取值下的最好 fitness，总能算出来）")
+    print("=" * 84)
+    for k in G.NAMES:
+        vals = G.GENES[k][0]
+        cells = []
+        for v in vals:
+            fs = [r[2] for r in ok_rows if json.loads(r[4])[k] == v]
+            cells.append((v, max(fs) if fs else None, len(fs)))
+        top = max((c[1] for c in cells if c[1] is not None), default=0)
+        line = []
+        for v, f, cnt in cells:
+            if f is None:
+                line.append("{}:  -  ".format(v))
+            else:
+                mark = "*" if abs(f - top) < 1e-9 else " "
+                line.append("{}:{:.3f}{}({})".format(v, f, mark, cnt))
+        print("  {:<16} {}".format(k, "  ".join(line)))
+    print("\n  格式  取值:最好fitness(该取值的成功样本数)   * = 该基因下的最优")
+    print("  注意：边际最优受其它基因干扰，不能替代精确消融，只作参考。")
     return 0
 
 

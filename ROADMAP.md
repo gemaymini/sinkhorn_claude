@@ -13,9 +13,9 @@
 |---|---|---|
 | P0 host 层 + 提交形态验证 | ✅ | 同步 memcpy 与设备查询去除，+17% |
 | P1 kernel 重写（S1 系列） | ✅ | 5.79x → 9.86x，时间构成已完全拆清 |
-| **提交件 v1** | ✅ | `submission/`，含 29 项合规自检 + 官方 auto_bench 复核脚本 |
+| **提交件 v1** | ✅ | `submission/`，含 33 项合规自检 + 官方 auto_bench 复核脚本 |
 | P2' GA 框架 | ✅ | `ga/`，mock 上端到端跑通 |
-| **P3' 对照实验** | ⏳ **下一步** | 4 算法 × 3 seed，约 10 小时机时 |
+| **P3' GA 搜索** | ⏳ **下一步** | `bash ga/run_ga.sh 60`，3 个 seed，约 2.5 小时机时 |
 | P4' 紧凑布局骨架 | ❌ | 唯一剩余的大杠杆（+19%） |
 | P5' 代码级 GA / LLM 闭环 | ❌ | 方法学亮点 |
 | P6' 最终复验与提交 | ❌ | |
@@ -36,21 +36,31 @@
 
 ---
 
-## P3'：GA 对照实验（下一步）
+## P3'：GA 搜索（下一步）
 
 ```bash
-bash ga/run_all.sh 60
+bash ga/run_ga.sh 60      # 预算 60 × 3 seed，约 2.5 小时
 ```
 
-4 个算法（岛屿 GA / TPE / 局部搜索 / 随机）× 3 个随机种子，同预算 60 次真实评估。
-单次评估 ~51s，合计约 **10 小时机时**，可过夜；`run_all.sh` 会跳过已完成的 db，
+只跑 GA，多个随机种子独立运行。单次评估 ~51s；已完成的 seed 自动跳过，
 中断可续跑。跑完自动调用 `ga/analyze.py` 出汇总。
 
 ### 产出
 
-- **收敛曲线**：best-so-far vs 真实评估次数，各算法均值
-- **算法比较**：最优 fitness（mean±std）、AUC、Mann-Whitney U
-- **逐基因消融**：固定最优个体，逐位回退测跌幅 —— 报告的核心图表
+- **收敛曲线**：best-so-far vs 真实评估次数，各 seed 一行 + 平均
+- **各 seed 稳定性**：最优 fitness 的 mean/std/极差
+- **逐基因消融 + 边际最优**：报告的核心图表
+- **健康度**：成功率与各结局分布
+
+### 若报告需要，补一轮随机搜索对照
+
+只有 GA 的话，「GA 找到了 X」无法区分于「跑了 N 次评估碰到了 X」。补一轮同预算的
+随机搜索即可（约 50 分钟）：
+
+```bash
+python ga/search.py --algo random --backend real --budget 60 --seed 0 \
+       --db ga/runs/random_s0.sqlite
+```
 
 ### 预期管理
 
@@ -162,7 +172,7 @@ v1 的测量 CV 约 2%，采纳噪声赢家会让提交件比已验证的配置�
 
 - [ ] 用最优配置重新 `bash submission/package.sh "队伍名" "UID"`
 - [ ] hold-out 复验：20 个未在调优中出现过的 seed + 全部形状
-- [ ] `bash submission/package.sh "队伍名" "UID"` —— 内置 29 项合规自检，不通过会中止打包
+- [ ] `bash submission/package.sh "队伍名" "UID"` —— 内置 33 项合规自检，不通过会中止打包
 - [ ] `bash run_auto_bench.sh` —— 用**官方原版** auto_bench.py 复核（不是我们复刻的版本）
 - [ ] 复核提交规范
   - [ ] 邮件主题 `【2026KernelSwift算子创新大赛】-<队伍名>-赛道二-<UID>`

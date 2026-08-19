@@ -39,6 +39,6 @@ echo "python     : ${PY}"
 echo "v0 (参考)  : ${HERE}/model_ref.py"
 echo "v1 (提交)  : ${HERE}/model_new.py"
 echo "----------------------------------------------------------------------"
-SINKHORN_OPS_SO="${SO}" "${PY}" "${BENCH}" \
+"${PY}" "${BENCH}" \
     --v0_file "${HERE}/model_ref.py" \
     --v1_file "${HERE}/model_new.py"

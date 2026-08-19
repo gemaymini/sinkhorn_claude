@@ -65,8 +65,8 @@ else
     done
     ( cd "${OUT}" && "${PY}" scripts/check_shapes.py --so "${SO}" --seeds 5 ) \
         | tee "${OUT}/results/precision.txt" | tail -4
-    ( cd "${OUT}" && SINKHORN_OPS_SO="${SO}" "${PY}" scripts/bench_official.py \
-        --module model_new.py --device npu --mode both ) \
+    ( cd "${OUT}" && "${PY}" scripts/bench_official.py \
+        --v0-file model_ref.py --v1-file model_new.py --device npu --mode both ) \
         | tee "${OUT}/results/performance.txt" | tail -6
     ( cd "${OUT}" && "${PY}" scripts/s1_scaling.py --so "${SO}" ) \
         > "${OUT}/results/scaling.txt" 2>&1 || true

@@ -1,4 +1,8 @@
-"""搜索算法：岛屿模型 GA、随机搜索、局部搜索、TPE(Optuna)。
+"""搜索算法。
+
+主线是**岛屿模型 GA**（`--algo ga`），由 `ga/run_ga.sh` 驱动。
+随机搜索 / 局部搜索 / TPE 保留为可选实现，当前实验不跑；
+若日后需要给报告补一个同预算对照，直接 `--algo random` 即可，无需改动其它部分。
 
 岛屿模型按 tile_target 分岛 —— 实测 tile<64 有明显台阶，是空间里最强的结构断层，
 按它分岛能避免小 tile 个体在早期被大 tile 个体直接淘汰、维持多样性。
@@ -254,7 +258,7 @@ def main():
     print("  耗时              : {:.1f}s  ({:.2f}s/次)".format(
         wall, wall / max(1, st["misses"])))
     cache.con.close()
-    # 跑完才改成正式名字：中断留下的 .partial 不会让 run_all.sh 误判为已完成
+    # 跑完才改成正式名字：中断留下的 .partial 不会让 run_ga.sh 误判为已完成
     os.rename(partial, db)
     print("  收敛曲线已存入     : {}".format(db))
     return 0

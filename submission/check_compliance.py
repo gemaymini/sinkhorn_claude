@@ -124,6 +124,8 @@ def main():
     print("auto_bench.py 兼容性（AST 过滤 + 符号 + 签名）")
     print("=" * 78)
     mods = {}
+    # 官方 build_case(): Model 只从 v0 取，ModelNew 只从 v1 取，两个文件各自都要
+    # get_init_inputs / get_inputs
     for path, role, need in ((v0, "v0", ["Model", "get_inputs", "get_init_inputs"]),
                              (v1, "v1", ["ModelNew", "get_inputs", "get_init_inputs"])):
         name = os.path.basename(path)
@@ -164,6 +166,24 @@ def main():
         d1 = mods["v1"].get_init_inputs()
         check(list(d0 or []) == list(d1 or []),
               "两文件 get_init_inputs() 一致", "{} vs {}".format(d0, d1))
+
+    print()
+    print("=" * 78)
+    print("规则 5.2 · 签名一致性与职责分离")
+    print("=" * 78)
+    # 规则 5.2 要求的是「与参考实现一致的 Model 定义，包括 __init__/forward 的参数」，
+    # 即**签名一致**，不是把参考实现抄进提交文件。
+    # auto_bench 的 build_case() 只从 v0 取 Model、只从 v1 取 ModelNew，互不干涉。
+    v1_src = open(v1, encoding="utf-8").read()
+    v1_tree = ast.parse(v1_src)
+    v1_classes = [n.name for n in v1_tree.body if isinstance(n, ast.ClassDef)]
+    check("Model" not in v1_classes,
+          "提交文件不重复定义 Model", "顶层类: {}".format(v1_classes))
+    check("softmax" not in v1_src,
+          "提交文件不含 PyTorch 等价实现",
+          "放一份可用的 torch 实现会构成规则 5.1 的嫌疑面")
+    check("os.environ" not in v1_src and "getenv" not in v1_src,
+          "提交文件不依赖环境变量", ".so 固定从本文件所在目录加载")
 
     print()
     print("=" * 78)
@@ -268,8 +288,7 @@ def main():
         print("=" * 78)
         check(os.path.isfile(args.so), ".so 存在", args.so)
         check(os.path.dirname(os.path.abspath(args.so)) == HERE,
-              ".so 与 model_new.py 同目录（无需环境变量即可被找到）",
-              warn_only=True)
+              ".so 与 model_new.py 同目录", "这是唯一的加载路径，不同目录会直接失败")
         try:
             import torch
             import torch_npu  # noqa: F401

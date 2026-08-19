@@ -1,19 +1,35 @@
 # SinkhornNormalize @ 昇腾 910B A2 —— 进化搜索调优实验方案
 
 > 赛题：2026 KernelSwift 算子创新大赛 赛道二 Task03 `sinkhorn`
-> 现状：`result.json` 记录 `speedup=4.622`（237.48us vs 1097.66us，自测 event 口径）
+> 起点：`result.json` 记录 `speedup=4.622`（237.48us，自测 event 口径 —— 非官方口径）
+> 当前：v1 = **158.55us**，官方口径 **9.86x**（固定 baseline 1563us）
 > **本文档已按官方评测脚本 `DLBlas/benchmarks/ks/auto_bench.py` 与本地数值实测结果校准**
 
 ---
 
 ## 0. 结论先行
 
-1. **官方容差是 `atol=1e-2, rtol=1e-2`**，比仓库自测用的 `1e-4/1e-5` 宽两三个数量级。本地 20 seed 实测（`experiments/numeric_feasibility.py`）证实：**省掉全部 eps、softmax 免减 max、全程 fp16 计算，三者叠加后裕度只占 6.1%**，可放心启用。
-2. **官方计时是 `perf_counter` 包住整个 `model.forward()` 再 `sync`，warmup 200 / repeat 500 / 取 median**。这意味着 **Python 层、torch dispatch、host 端 ACL 调用、kernel launch、stream sync 全部计入**。
-3. **（P0 已验证）** 因此第一块肉在 host 绑定层：当前 `sinkhorn_normalize_torch()` 每次调用都做一次 `aclrtGetDeviceInfo` 查核数、两次张量分配、以及**一次同步阻塞的 `aclrtMemcpy` 传 tiling**。这几项是纯固定开销、零风险可去除，优先级高于任何 kernel 微调。
-4. kernel 本身是**小粒度指令 + 标量↔向量同步**延迟瓶颈：每个 4×4 矩阵 ~228 条向量指令、~198 个 `PipeBarrier`、**~82 对标量-向量同步**，而每条向量指令只用到 8~32 个 lane（fp32 满载是 64）。
-5. **现实目标：15~21x（硬上限 22.7x）**。已由 P0 真机实测确定，见 §2.3。
-6. **明确不建议截断 Sinkhorn 迭代**（见 §3），收益小、风险是直接判 0 分。
+> 本文档是**实验总纲与实测记录**。§0~§4 是已完成的实测结论（数据可直接引用），
+> §5 起是路线演变、方法学取舍与进度。GA 的实现细节见 [GA_DESIGN.md](GA_DESIGN.md)，
+> 未来工作见 [ROADMAP.md](ROADMAP.md)。
+
+1. **官方容差是 `atol=1e-2, rtol=1e-2`**，比仓库自测用的 `1e-4/1e-5` 宽两三个数量级。
+   但**宽容差不等于可以随便近似** —— 见第 6 条。
+2. **官方计时是 `perf_counter` 包住整个 `model.forward()` 再 `sync`，warmup 200 / repeat 500 / 取 median**。
+   Python 层、torch dispatch、host 端 ACL 调用、kernel launch、stream sync **全部计入**。
+3. **第一块肉在 host 绑定层**：原实现每次调用都查一次设备核数、分配两次张量、
+   并做**一次同步阻塞的 `aclrtMemcpy` 传 tiling**。去除后 **+17%**，零精度风险。
+4. **kernel 的瓶颈不是算力，是小粒度指令 + 标量↔向量同步**：原实现每个 4×4 矩阵
+   ~228 条向量指令、~198 个 `PipeBarrier`、**~82 对标量-向量同步**，每条向量指令
+   只用到 8~32 个 lane（fp32 满载 64）。重写为 padded-AoS 批量化后 5.79x → 9.86x。
+5. **当前进入 launch 开销主导区间**：`t(repeat)=a+b·repeat` 拟合显示
+   **launch 地板 62us（63%）+ 搬运 27us（27%）+ 全部计算 10us（10%）**，
+   10 次 Sinkhorn 迭代总共不到 5us。**绝对上限约 14.9x**（当前 9.86x）。
+6. **两条数值红线**：`softmax(x) + eps` 不能省（只在官方 `randn` 分布下看着安全，
+   `randn×4` 就崩）；Sinkhorn 迭代不能截断（第 10 次本身都尚未收敛）。
+   **数值近似必须跨输入尺度验证。**
+7. **平台原语要写探针实测**：`Reciprocal` 只有 9 位精度；`DataCopyPad` 每块补齐 32B
+   导致 SoA 平面布局不可行。仓库原 README 对 `BlockReduceSum` 的描述就和实际代码对不上。
 
 ---
 
@@ -106,7 +122,7 @@ def time_forward(model, inputs, seed, warmup, repeat):
 
 ---
 
-## 2.3 P0 真机实测结果（910B2，CANN 9.0.0，两次独立运行，已完成）
+### 2.3 P0 真机实测结果（910B2，CANN 9.0.0，两次独立运行，已完成）
 
 `bash scripts/run_p0.sh` 的产出。**所有后续目标都以这组数为准。**
 
@@ -243,253 +259,154 @@ Sinkhorn 收敛轨迹（seed=42，第 k 次 vs 第 10 次）：
 | **Host** | tiling 编译期常量化或走 kernel 标量入参 | 中 | 无 |
 | **Host** | 绕开 `TORCH_LIBRARY` boxing，改 pybind 直调 | 小~中 | 无 |
 | **Python** | `ModelNew.forward` 里零多余操作（无 `.contiguous()`、无 shape 检查） | 小 | 无 |
-| **Kernel 结构** | SoA 平面布局：把 `(M,4,4)` 重排为 16 个长度 M 的平面，行/列和退化成 elementwise `Add`，**归约/广播/mask/标量全部消失** | **大（kernel 145us → ~5us）** | 无（等价变换） |
+| ~~**Kernel 结构**~~ | ~~SoA 平面布局~~ | ❌ **已被探针证伪**：`DataCopyPad` GM→UB 每块补齐到 32B，平面元素步长为 8，会有 8 倍 lane 浪费 |
 | **Kernel 结构** | 批量化：单次处理 B 个矩阵而非 1 个 | 大 | 无 |
 | **Kernel 指令** | `Div` → `Reciprocal` + `Mul`；消除冗余 `PipeBarrier`；double buffering；合并小 `DataCopyPad` | 中 | 无 |
 | **数值** | fp16 计算 + 免 eps + 免 max | 中 | 低（已实测，裕度 16x） |
 | **调度** | 用核数不必打满（小 shape 下满核未必最快）；tile 大小 | 中 | 无 |
 
-### SoA 平面布局展开
+### 为什么最终没走 SoA
 
-重排为 16 个平面 `P[r][c]`（每个长度 M）后：
-- 行和 = `P[r][0]+P[r][1]+P[r][2]+P[r][3]` → 3 条 `Add`，无归约、无广播、无 mask、无标量
-- 归一化 = 1 条 `Reciprocal` + 4 条 `Mul`
-- 每次迭代：行归一 4×(3 `Add` + 1 `Reciprocal` + 4 `Mul`) = 32 条，列归一同样 32 条
-- **10 次迭代共 640 条向量指令，0 次标量同步**，加转置进出 ~50 条
+探针实测（`probe/`，见 §2.4）显示 `DataCopyPad` 在 `blockLen=4B` 时**每块补齐到 32B**，
+抽出来的"平面"元素步长为 8 而非紧凑排列，count-based 向量 API 无法直接使用，
+只能退回 level-0 带 blkStride 的形式，每个 repeat 只用 8 个 lane —— 8 倍浪费。
 
-转置实现是关键子问题，作为基因交给搜索：`GATHERMASK`（按 `p ≡ k (mod 16)` 的 pattern 抽取）/ `GATHER`（偏移表）/ `DATACOPY_STRIDE`（32B 粒度分块 + 块内重排）/ `NONE`（走 AoS 批量化路线兜底）。
-**这几种 API 的真实吞吐必须真机实测，不能按文档想当然** —— 这是 P1 的核心任务。
-
----
-
-## 5. 三条 Track
-
-| Track | 搜索对象 | 编译通过率预期 | 定位 |
-|---|---|---|---|
-| **A. 参数化模板 GA**（主力） | 模板 holes 的离散取值 | >95% | 稳定产出、可归因、易写报告 |
-| **B. 代码级 GA** | `.asc` 源码语句序列上的变异算子 | 40~70% | 挖模板没覆盖的微观优化 |
-| **C. LLM 引导 GA** | 变异/交叉由 LLM 生成 | 60~80% | 跨结构跳跃；与 KernelSwift 形成闭环，是答辩亮点 |
-
-执行顺序：**P0 host 侧白拿收益 → P1 人工写 2~3 个骨架并真机验证转置可行性 → Track A 全量搜 → Track B 精修 → Track C 做对照与亮点。**
+最终采用的是 **padded-AoS 批量化**（S1），用的全是探针确认过的原语：
+`DataCopyPad + rightPadding`、`BlockReduceSum`（结果连续）、`Brcb`、`Div`。
+详见 `op_kernel/sinkhorn_normalize_kernel_s1.asc` 的文件头注释。
 
 ---
 
-> **实现说明见 [GA_DESIGN.md](GA_DESIGN.md)** —— 本节是最初的设计，实际实现基于
-> P0/P1 的实测结果做了大幅收窄（20 位基因 → 10 位，删掉 5 位已被证伪的）。
+## 5. 路线演变：计划 vs 实际
 
-## 6. Track A：参数化模板 GA
+最初规划了三条 Track（参数化模板 GA / 代码级 GA / LLM 引导进化）。实际执行时，
+P0/P1 的实测结果大幅改变了优先级，这里如实记录：
 
-### 6.1 基因型（20 位，混合类型）
-
-**Host / 提交层（新增，优先级最高）**
-
-| # | 基因 | 取值域 |
+| 原计划 | 实际 | 原因 |
 |---|---|---|
-| h1 | `tiling_mode` | `{PER_CALL_MEMCPY(现状), CACHED_STATIC, ASYNC_MEMCPY, KERNEL_SCALAR_ARG, COMPILE_CONST}` |
-| h2 | `core_query` | `{PER_CALL, CACHED_ONCE}` |
-| h3 | `dispatch` | `{TORCH_LIBRARY, PYBIND_DIRECT}` |
+| Track A：20 位基因的模板 GA | **收窄为 10 位基因、直接用编译期开关** | 5 条前提被实测证伪（见 §3 更正与 §2.3） |
+| 先做 S2（SoA 平面） | **改做 S1（padded-AoS）** | 探针发现 `DataCopyPad` 补齐 32B，SoA 不可行 |
+| 4 算法同预算对照 | **只跑 GA，多 seed** | 机时从 10h 降到 2.5h；对照可按需补一轮随机搜索 |
+| Track B / Track C | **推迟** | 见 [ROADMAP.md](ROADMAP.md) |
 
-**Kernel 结构层**
+**最大的一条教训**：如果当初照原基因空间直接跑 GA，24 小时机时会花在一个
+「80% 的基因只影响 3% 运行时间」的空间里。P1 那几轮手工调优实质上是**搜索空间的设计阶段**。
 
-| # | 基因 | 取值域 |
+---
+
+## 6. 遗传算法
+
+**完整设计见 [GA_DESIGN.md](GA_DESIGN.md)**（基因空间、适应度、岛屿模型、公平性设计、局限）。
+这里只记与本文档其它部分的衔接：
+
+- 基因空间 **10 位**，去冗余后 **4480 个有效点**，每一位的取值范围都来自 §2.3 / §3 的实测
+- 适应度用**固定 baseline 1563us**（§1 口径），精度是**硬门禁**而非罚分
+- 搜索用快档保真度，结果必须经 `ga/apply_best.py` 全档复验 + 1.5% 噪声阈值才会采纳
+- 当前只跑 GA（`bash ga/run_ga.sh`），随机搜索等对照实现保留在 `ga/search.py` 里可按需启用
+
+---
+
+## 7. 未来工作
+
+紧凑布局骨架（性能上唯一剩余的大杠杆，+19%）、代码级变异 GA、LLM 引导进化 ——
+全部移到 **[ROADMAP.md](ROADMAP.md)**，含技术方案与待办清单。
+
+---
+
+## 8. 实验方法学的实际取舍
+
+原方案设计了 E-A ~ E-G 七组对照。实际保留下来的和放弃的：
+
+| 原对照 | 状态 | 说明 |
 |---|---|---|
-| g1 | `skeleton` | `{S0_CURRENT, S1_BATCH_AOS, S2_SOA_PLANE, S3_SOA_FUSED}` ← **结构基因，决定模板与岛屿** |
-| g2 | `mats_per_tile` | `{1,2,4,8,16,32,64,128,256}` |
-| g3 | `block_num_frac` | `{1/8,1/6,1/4,1/3,1/2,2/3,1} × C` |
-| g4 | `queue_depth` | `{1,2}` |
-| g5 | `transpose_impl` | `{NONE, GATHERMASK, GATHER, DATACOPY_STRIDE}` |
-| g6 | `copy_in_mode` / g7 `copy_out_mode` | `{PAD_PER_ROW, SINGLE_BULK, STRIDED_BLK}` |
-| g8 | `compute_dtype` | `{FP32, FP16, BF16}` ← **实测已验证 FP16 安全** |
-| g9 | `div_impl` | `{DIV, RECIP_MUL, RECIP_NR1}` |
-| g10 | `softmax_max` | `{REDUCEMAX, SKIP}` ← 实测裕度 0.000 |
-| ~~g11~~ | ~~`eps_mode`~~ | **已删除**：`softmax+eps` 不能省，见 §3 更正 |
-| g12 | `sync_mode` | `{BARRIER_ALL, BARRIER_MIN, SET_WAIT_FLAG}` |
-| g13 | `scalar_free` | `{0,1}` |
-| g14 | `unroll_iter` | `{1,2,5,10}` |
-| g15 | `rowcol_fusion` | `{SEPARATE, FUSED}` |
-| g16 | `ub_reuse` | `{SEPARATE, INPLACE}` |
-| g17 | `tail_mode` | `{MASKED, SEPARATE_LOOP}` |
-| g18 | `compile_opt` | `{O2, O3, O3_FASTMATH}` |
+| E-A 算法对照（Random/Local/TPE/GA） | **放弃** | 机时考虑。若报告需要，补一轮同预算随机搜索约 50 分钟 |
+| E-B 单种群 vs 岛屿模型 | 放弃 | 岛屿模型直接采用（依据：tile<64 有实测性能台阶） |
+| E-C 有/无播种 | **保留能力** | `ga/search.py --no-seed` |
+| E-D 有/无多保真 | 放弃 | 多保真直接采用 |
+| E-E 有/无去重缓存 | 放弃 | 去重直接采用（实测压缩 38%） |
+| **E-F 逐基因消融** | **保留，核心产出** | `ga/analyze.py` 输出，另有边际最优作兜底 |
+| E-G host vs kernel 收益拆分 | **已完成** | 见 §2.3，host 层 +17%，kernel 层 5.79x→9.86x |
 
-> **`iter_trunc` 基因已按 §3 的实测结果剔除。**
+**实际执行中新增的方法学手段**（原方案没有，但被证明更重要）：
 
-搜索空间 ≈ 10⁹ 量级。
+| 手段 | 脚本 | 解决的问题 |
+|---|---|---|
+| 迭代次数扫描 | `scripts/s1_scaling.py` | 用 `t(repeat)=a+b·repeat` 拆开每 tile 固定开销与每次迭代开销。**零代码成本，却是唯一能证明"迭代体只占 3%"的手段** |
+| 原语行为探针 | `probe/` | 实测 API 的布局与精度，不信文档 |
+| CPU 算法仿真 | `scripts/s1_simulate.py` | 逐条模拟 kernel 数据流，在本地排掉索引/尾块/填充位错误 |
+| 数值可行性扫描 | `experiments/numeric_feasibility.py` | 跨输入尺度验证数值近似，抓出"省 eps 只对官方分布成立"这个陷阱 |
+| 诊断变体 | `SN_S1_DIAG` | 故意算错、只用于计时，直接量出 MTE 搬运与 `BuildEpsVector` 的成本 |
 
-### 6.2 约束修复
+---
 
-交叉/变异后跑 `repair(genome)`：
-- 按 `skeleton` 屏蔽无效基因（置哨兵值，**不参与交叉、不参与哈希**）
-- `mats_per_tile × 元素宽度 × queue_depth ≤ UB 容量`（fp16 时上限翻倍）
-- `block_num_frac × C ≤ totalMats`
-
-**去重哈希用「渲染后的源码 + 编译选项」，不是基因组** —— 不同基因组常渲染出同一份代码，实测这类框架能省 20~35% 评估。
-
-### 6.3 适应度
+## 9. 基础设施
 
 ```
-evaluate(genome):
-    src = render(genome)                       # kernel.asc + host.cpp + model_new.py
-    key = sha256(src + flags)
-    if key in cache: return cache[key]
+scripts/
+├── check_shapes.py         精度门禁（12 形状 × N seed，官方容差 + 裕度占用）
+├── bench_official.py       官方口径评测（复刻 auto_bench，含 AST 过滤预演、交替测量、固定 baseline）
+├── s1_scaling.py           固定开销 vs 每次迭代开销的线性拟合
+├── s1_simulate.py          S1 算法的 CPU 逐条仿真
+├── p0_host_breakdown.py    M1~M6 时间拆解
+├── p0_ast_check.py         提交形态的 AST 过滤验证
+├── probe_report.py         探针结果解读
+├── _build_lib.sh           隔离编译、失败日志落盘、torch-python 定位
+└── run_p0.sh / run_s1.sh / run_probe.sh
 
-    if not compile(src):            return 0.0, "COMPILE_FAIL"
-    if not run_ok():                return 0.0, "RUNTIME_FAIL"
-    if not custom_kernel_ran():     return 0.0, "FALLBACK_DETECTED"   # 反作弊自查
-    if not precision_ok():          return 0.0, "PRECISION_FAIL"
-
-    t   = median(auto_bench 口径计时 × 3 个独立进程)
-    iqr = IQR(那 3 次)
-    return BASELINE_MS_FIXED / (t + 0.5 * iqr)
-```
-
-要点：
-- **计时必须完全复刻 `auto_bench.py`**：`perf_counter` + 每次 `sync`，warmup 200 / repeat 500 / median。直接把 `auto_bench.py` 拉进 harness 当库用，不要自己重写。
-- `BASELINE_MS_FIXED` 测一次固定成常量，否则 baseline 自身抖动会污染排序。
-- **精度门禁比官方更严**：用 20 个随机 seed + 多 shape，且要求裕度占用 < 0.5（留一半安全边际），防止过拟合到 seed 42。
-- 门禁里必须有 `custom_kernel_ran()`，对应规则 5.1 的反作弊条款。
-
-### 6.4 多保真评估
-
-| 级别 | 手段 | 耗时 | 用途 |
-|---|---|---|---|
-| F0 | 只编译 | ~20s | 淘汰非法个体 |
-| F1 | warmup 20 / repeat 50 + 1 seed 精度 | ~10s | 粗排，留 top 30% |
-| F2 | 完整 auto_bench 口径 × 3 进程 + 20 seed 精度 | ~40s | 精测入库 |
-
-### 6.5 进化算子
-
-- **选择**：锦标赛 `k=3` + 每岛精英保留 2
-- **交叉**：均匀交叉 `p_cx=0.7`；跨骨架个体只交换共有基因
-- **变异**：`p_mut=0.15/基因`；有序基因 80% 走 ±1 邻域、20% 均匀重采样；类别基因均匀重采样。**自适应**：连续 5 代无提升 → `p_mut` 翻倍至 0.4；再 5 代无提升 → 重启最差 50%
-- **岛屿模型**：按 `skeleton` 分 4 岛（每岛 10 个体，总种群 40），每 5 代迁移 2 个精英
-- **播种**：1 个 = 当前 KernelSwift 版本；4 个 = P0/P1 的人工最优；其余用拉丁超立方采样
-
-### 6.6 预算
-
-| 项 | 值 |
-|---|---|
-| 种群 / 代数 | 40 / 40 → 名义 1600 次评估 |
-| 去重命中 ~30% → 实际 | ~1100 次 |
-| 多保真后均耗时 | ~25s/个体 |
-| 单卡串行 / 4 卡并行 | ~7.6h / **~2h** |
-| 3 seed × 4 算法的完整对照 | **~24h 机时** |
-
----
-
-## 7. Track B：代码级 GA（变异算子目录）
-
-在 Track A 最优个体的源码上跑。**基因型是「已应用变异算子的集合 + 顺序」，表型才是源码** —— 这样可重放、可归因，交叉退化成集合交叉，比直接换代码块安全得多。
-
-| M# | 变异算子 | 对应 |
-|---|---|---|
-| M1 | 删除冗余 `PipeBarrier`（读写集无冲突时） | W3 |
-| M2 | `PipeBarrier` → `SetFlag/WaitFlag` 细粒度同步 | W3 |
-| M3 | `Div(a,b,c)` → `Reciprocal(t,c); Mul(a,b,t)` | W5 |
-| M4 | 相邻同类小调用合并（4 次 `count=8` → 1 次 `count=32`） | W2 |
-| M5 | 多次 `DataCopyPad` → 单次 `DataCopy` + 块内重排 | W4 |
-| M6 | 循环不变量外提 | — |
-| M7 | 循环展开 / 循环交换 | — |
-| M8 | buffer 原地化与合并 | W2 |
-| M9 | 队列深度 1→2 | W3 |
-| M10 | 独立向量指令重排（软件流水） | W3 |
-| M11 | 标量 `GetValue/SetValue` → `Duplicate`/`Select`/mask | W1 |
-| M12 | host 侧：同步 memcpy → static 缓存 / 标量入参 | H4 |
-
-实现：tree-sitter 或 libclang 解析（`.asc` 本质是 C++），在语句列表上模式匹配 + 重写。编译错误信息回灌给 Track C。
-
----
-
-## 8. Track C：LLM 引导进化（KernelSwift 闭环）
-
-把 KernelSwift/Claude 当**变异与交叉算子**而非一次性生成器（FunSearch / AlphaEvolve 范式）：
-
-- **变异 prompt** = 当前源码 + msprof 摘要 + 历史有效变异清单 + 「只改一处并说明理由」
-- **交叉 prompt** = 两个高分个体 + 各自优势归因 + 「合并两者优点」
-- **程序数据库**：MAP-Elites 风格，行为描述符 `(向量指令数, 标量同步数, UB 占用, host 调用数)`，按格保留精英以维持多样性
-- **反馈闭环**：编译错误 / 精度失败 / profiling 热点直接回灌下一轮 prompt
-
-单次 LLM 调用 30~60s，只在 Track A 收敛后用于跨结构跳跃，预算 200~400 次。
-
----
-
-## 9. 对照实验与消融（报告核心）
-
-同预算、同 3 个随机种子，报 mean±std。
-
-| ID | 实验 | 目的 |
-|---|---|---|
-| **E-A** | Random / Local Search / **TPE(Optuna)** / GA / GA+LLM | 证明搜索算法本身有价值。**TPE 是强对手，20 维离散空间下常与 GA 相当，必须做** |
-| **E-B** | 单一大种群 vs 岛屿模型 | 结构基因的处理方式 |
-| **E-C** | 有/无 seeding | 人工先验的价值 |
-| **E-D** | 有/无 多保真 | 同 wall-clock 下的解质量 |
-| **E-E** | 有/无 源码去重缓存 | 工程手段收益 |
-| **E-F** | **逐基因消融**：固定最优个体，逐个基因回退测跌幅 | **核心归因图**。预期前三：`tiling_mode` / `skeleton` / `scalar_free` |
-| **E-G** | host 层基因 vs kernel 层基因的收益拆分 | 回答"钱花在哪" |
-
-**指标**：最优 speedup（mean±std）｜best-so-far 曲线与 AUC｜达到 10x/20x/30x 所需评估次数｜编译/运行/精度通过率｜缓存命中率｜Mann-Whitney U 检验（n=3，同时报效应量）
-
----
-
-## 10. 基础设施
-
-```
 ga/
-├── config.yaml            基因空间、GA 超参、预算、设备列表
-├── genome.py              基因定义、编解码、repair()、邻域
-├── render.py              Jinja2 -> kernel.asc + host.cpp + model_new.py + CMake flags
-├── templates/             S0_current / S1_batch_aos / S2_soa_plane / S3_soa_fused (.j2)
-├── evaluate.py            F0/F1/F2 三级评估；子进程 + 超时 + device 清理
-├── bench_adapter.py       直接复用官方 auto_bench.py 的计时与比对
-├── cache.py               sha256(源码+flags) -> 结果，SQLite 持久化
-├── ga.py                  岛屿模型主循环
-├── baselines.py           random / local / TPE(optuna) 对照
-├── llm_ops.py             Track C 变异/交叉算子
-├── analyze.py             收敛曲线、消融柱状图、统计检验
-└── mock_backend.py        Mac 上可跑的假评估器（解析代价模型打分）
+├── genome.py / cache.py / evaluate.py / search.py
+├── apply_best.py           全档复验 + 噪声阈值 + 写回 CMakeLists
+├── analyze.py              收敛曲线、逐基因消融、边际最优
+└── run_ga.sh / monitor.sh
 
-experiments/
-└── numeric_feasibility.py  ✅ 已完成，见 §3
+probe/          AscendC 原语探针（kernel + host）
+experiments/    数值可行性实验（纯 CPU）
+submission/     提交件 + 33 项合规自检 + 打包脚本
 ```
 
-**必须处理的坑**：
-1. 每个 worker 独立 `build_<hash>/` 目录，避免 CMake 并发写冲突
-2. 编译 180s / 运行 60s 超时即 kill；失败后 device reset，防连锁失败
-3. **编译可并行，计时必须每卡串行独占**，否则数据全废
-4. 每轮开跑前先测一次「金标个体」做漂移校准，漂移 >5% 该轮作废重跑
-5. 1600 次编译产物及时清理，只留 top-50 的完整 build
-6. 每代 checkpoint 种群 + cache，支持断点续跑
+**必须处理的工程坑**（全部已实现）：
+
+1. 每个个体独立 `build_ga_<hash>/`，避免 CMake 并发写冲突；评估完立即删除
+2. 编译 300s / 运行 240s 超时即杀
+3. **编译可并行，计时必须独占**
+4. baseline 钉死成常量，否则 ±11% 漂移会淹没 2% 的真实差异
+5. 结果库先写 `.partial`，跑完才改名 —— 中断不会被误判为已完成
+6. 换容器后 `CMakeCache.txt` 失效：配置失败自动清目录重试
+7. CMake 的 `find_package(Python3)` 可能挑到没装 torch 的解释器：显式传 `-DPython3_EXECUTABLE`
 
 ---
 
-## 11. 里程碑
+## 10. 里程碑（实际进度）
 
-| 阶段 | 内容 | 产出 | 预计 |
-|---|---|---|---|
-| **P0** ✅ | ① host 打点拆出三段时间 ② 验证 AST 过滤下 `.so` 能加载 ③ 只改 host 侧 | **已完成**：3.834x → 4.629x，地板 55.3us，上限 22.7x（§2.3） | 已完成 |
-| **P1** | **先只写 S1（AoS 批量化 + 消除标量同步）** —— 按 §2.3 的推演，S1 若能把 kernel 压到 30~50us 就已拿到 12~15x；S2（SoA 转置）留到 S1 落地后再按边际收益决定是否值得 | S1 骨架 + 实测 | 1.5 天 |
-| **P1b** | 仅当 S1 结果显示还有明显空间时才做：S2 SoA 平面 + `GatherMask` 吞吐实测 | S2 骨架 | 1.5 天 |
-| **P2** | 搭 harness（render/evaluate/cache/mock），复用官方 auto_bench | Mac mock 跑通 + 真机跑通 10 个体 | 1.5 天 |
-| **P3** | Track A 全量搜索 + E-A/B/C/D 对照 | 收敛曲线、最优个体 | 2 天（含 24h 机时） |
-| **P4** | Track B 精修 + E-F/E-G 消融 | 归因图 | 1.5 天 |
-| **P5** | Track C LLM 闭环 | 对照结果 | 1.5 天 |
-| **P6** | hold-out 复验（20 未见 seed + 多 shape）+ 按 §4.2 打包提交 | 提交件 | 0.5 天 |
-
----
-
-## 12. 风险
-
-| 风险 | 影响 | 对策 |
+| 阶段 | 状态 | 产出 |
 |---|---|---|
-| **AST 过滤导致 `.so` 加载失败** | 直接 0 分 | **P0 第一件事就验证**；加载逻辑放 `__init__` 或独立模块 |
-| 被判定 fallback 到内置算子 | 不计成绩 | 门禁加 `custom_kernel_ran()` 自查 |
-| 官方收紧容差或换 seed | 数值近似翻车 | 自测门禁要求裕度 <0.5；已剔除截断迭代基因 |
-| `GatherMask`/`Gather` 实际吞吐差 | S2/S3 打折 | 保留 S1（AoS 批量化）兜底，P1 就测出来 |
-| 计时噪声淹没微小改进 | 搜索走偏 | median of 3 进程 + IQR 惩罚 + 金标漂移校准 |
-| GA 早熟 | 停在局部最优 | 岛屿模型 + 自适应变异 + 50% 重启 |
-| 机时不够 | 对照做不完 | 优先级 E-A > E-F > E-G > E-C > E-B > E-D > E-E |
+| P0 host 层 + 提交形态验证 | ✅ | 同步 memcpy 与设备查询去除，+17% |
+| P1 kernel 重写（S1 系列） | ✅ | 5.79x → 9.86x，时间构成完全拆清 |
+| 提交件 v1 | ✅ | `submission/`，33 项合规自检 + 官方 auto_bench 复核 |
+| P2' GA 框架 | ✅ | `ga/`，mock 上端到端跑通 |
+| P3' GA 搜索 | ⏳ 下一步 | `bash ga/run_ga.sh 60`，约 2.5 小时 |
+| P4' 紧凑布局骨架 | ❌ | 唯一剩余大杠杆（+19%），见 ROADMAP |
+| P5' 代码级 GA / LLM 闭环 | ❌ | 见 ROADMAP |
 
 ---
 
-## 13. 一句话总结
+## 11. 风险与对策
 
-**host 侧的同步 memcpy 已经干掉，白拿 +21%（3.83→4.63x）。地板实测 55.3us，硬上限 22.7x。剩下 182us 全在 kernel 里：先做 S1（AoS 批量化 + 消除 82 对/矩阵的标量同步 + fp16），压到 30us 就有 ~15x；S2 完整 SoA 转置只多换 40%，按边际收益再定。最后用岛屿模型 GA 搜细节、用逐基因消融归因。截断迭代不要碰。**
+| 风险 | 状态 | 对策 |
+|---|---|---|
+| AST 过滤导致 `.so` 加载失败 | ✅ 已解决 | 官方确实设置 `module.__file__`，`.so` 与 `model_new.py` 同目录即可；33 项合规自检覆盖 |
+| 被判定 fallback 到内置算子 | ✅ 已解决 | 内置调用计数器 + 合规检查验证**每条 return 路径**都走自定义算子 |
+| 官方收紧容差或换 seed | ✅ 已缓解 | 当前裕度占用 0.0000（余量 5 个数量级）；门禁要求 <0.5 |
+| 计时噪声淹没真实差异 | ✅ 已缓解 | 固定 baseline + 交替测量 + IQR 惩罚；判据用 v1/M1 而非 speedup |
+| GA 采纳噪声赢家 | ✅ 已缓解 | `apply_best.py` 全档复验 + 1.5% 阈值 |
+| GA 为速度牺牲鲁棒性 | ✅ 已缓解 | 精度门禁含 `randn×32`，`use_max=0` 会因 `exp` 溢出被淘汰 |
+| 报告缺少算法对照 | ⚠️ 未解决 | 需要时补一轮随机搜索（约 50 分钟） |
+
+---
+
+## 12. 一句话总结
+
+**host 侧同步 memcpy 值 +17%；kernel 从 per-matrix 标量同步重写成 padded-AoS 批量化值 5.79x→9.86x；
+剩下 63% 的时间是任何自定义算子都躲不掉的 launch 开销，绝对上限 14.9x。
+所有数值近似必须跨输入尺度验证，所有平台原语行为必须写探针实测，
+动结构前必须先用 `t(repeat)=a+b·repeat` 确认收益在哪。**

@@ -132,8 +132,10 @@ for v in "${VARIANTS[@]}"; do
     [ "${PREC[${name}]:-fail}" = "pass" ] || continue
     echo
     echo "######## ${name} ########"
-    SINKHORN_OPS_SO="${ROOT}/build_${name}/${SO}" ${PY} scripts/bench_official.py \
-        --module submission/model_new.py --device npu --mode both \
+    cp submission/model_new.py "build_${name}/"     # .so 必须在 model_new.py 旁边
+    ${PY} scripts/bench_official.py \
+        --v0-file submission/model_ref.py --v1-file "build_${name}/model_new.py" \
+        --device npu --mode both \
         | grep -E "裕度占用|Speedup|interleaved|official|反 fallback"
 done
 

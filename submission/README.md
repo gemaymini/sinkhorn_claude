@@ -60,19 +60,46 @@ bash run_auto_bench.sh /path/to/DLBlas/benchmarks/ks/auto_bench.py
 它等价于：
 
 ```bash
-SINKHORN_OPS_SO=$PWD/libsinkhorn_normalize_ops.so python3 auto_bench.py \
+python3 auto_bench.py \
     --v0_file $PWD/model_ref.py \
     --v1_file $PWD/model_new.py
 ```
 
+### 两个文件的职责
+
+官方 `auto_bench.py` 的 `build_case()` 从**两个独立文件**分别读取：
+
+```python
+model_cls     = require_attr(v0_module, "Model",    v0_path)   # 只从 v0 取
+model_new_cls = require_attr(v1_module, "ModelNew", v1_path)   # 只从 v1 取
+```
+
+| 文件 | 角色 | 定义 |
+|---|---|---|
+| `model_ref.py` | `--v0_file` | `Model`（赛题参考实现，逐字照抄）+ `get_inputs` / `get_init_inputs` |
+| `model_new.py` | `--v1_file` | `ModelNew`（自定义算子）+ `get_inputs` / `get_init_inputs` |
+
+规则 5.2 的「与参考实现一致的 Model 定义，包括 `__init__` 和 `forward` 的参数」指的是
+**签名一致** —— `ModelNew.__init__(repeat=10, eps=1e-6)` 与 `ModelNew.forward(x)`
+必须与参考实现对得上，而**不是**把参考实现抄进提交文件。
+
+`model_new.py` 因此**刻意不包含任何 PyTorch 版的等价实现**：规则 5.1 禁止 fallback 到
+内置算子，提交文件里放一份可用的 torch 实现本身就构成嫌疑面。`forward` 的每一条
+返回路径都只调用自定义算子，合规自检会逐条验证。
+
 ### `.so` 的定位
 
 官方 `load_ks_module()` 会设置 `module.__file__ = str(path)`，因此 `model_new.py`
-能拿到自身路径。**本提交包已把 `libsinkhorn_normalize_ops.so` 放在 `model_new.py`
-同目录，无需任何环境变量即可被找到。**
+能拿到自身路径。**`.so` 就固定从这一个位置加载 —— `model_new.py` 所在目录**，
+没有环境变量、没有多路径回退：
 
-完整查找顺序：`SINKHORN_OPS_SO` → `SINKHORN_OPS_DIR` → 本文件所在目录及其 `build/`
-→ 当前目录及其 `build/` → `sys.path`。若环境特殊，显式设置 `SINKHORN_OPS_SO` 最稳妥。
+```python
+so = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                  "libsinkhorn_normalize_ops.so")
+```
+
+`build.sh` 编译后会把产物复制到本目录，打包时一并带上。找不到就抛异常并提示运行
+`bash build.sh`，**绝不静默回退到 PyTorch 内置算子**。
 
 ---
 
@@ -191,15 +218,17 @@ AST 过滤后 `exec`。
 
 ### 5.4 合规自检
 
-`check_compliance.py` 逐条对照官方规则与 `auto_bench.py` 的实际行为做 29 项检查：
+`check_compliance.py` 逐条对照官方规则与 `auto_bench.py` 的实际行为做 33 项检查：
 
 | 类别 | 检查内容 |
 |---|---|
 | 规则 5.2 | 文件 UTF-8 编码、Python ≥ 3.10 |
-| auto_bench 兼容 | AST 过滤后可 exec、必需符号齐全、顶层无被丢弃的可执行语句、`get_inputs`/`get_init_inputs` 返回类型、**`ModelNew` 的 `__init__`/`forward` 参数与 `Model` 完全一致** |
+| auto_bench 兼容 | AST 过滤后可 exec、必需符号齐全、顶层无被丢弃的可执行语句、`get_inputs`/`get_init_inputs` 返回类型 |
+| 规则 5.2 | **`ModelNew` 的 `__init__`/`forward` 参数与 `Model` 完全一致**；提交文件不重复定义 `Model`、不含 PyTorch 等价实现 |
 | 规则 5.1 | `forward` 的**每一条返回路径**都调用自定义算子、内部不含 PyTorch 内置实现痕迹、无异常捕获 |
 | 规则 4.2 | 算子代码 / README / 环境配置 / 运行脚本 / 性能结果齐备 |
 | 规则 4.3 | README 含作品说明、优化方案、性能测试结果、原创声明 |
+| 构建自包含 | `CMakeLists.txt` 引用的源文件均在包内（自动跳过 `if(EXISTS)` 保护的目标） |
 | 运行时 | 算子注册成功、`forward` 真实进入 kernel（调用计数器递增）、官方容差下结果一致 |
 
 该检查是打包流程的最后一道闸，不通过则中止打包。
@@ -234,12 +263,12 @@ AST 过滤后 `exec`。
 
 ```
 .
-├── model_new.py                    提交文件（v1，含 ModelNew）
-├── model_ref.py                    赛题参考实现（v0，逐字照抄）
+├── model_new.py                    提交文件（v1）：只定义 ModelNew / get_inputs / get_init_inputs
+├── model_ref.py                    赛题参考实现（v0）：只定义 Model / get_inputs / get_init_inputs
 ├── libsinkhorn_normalize_ops.so    预编译产物，与 model_new.py 同目录
 ├── build.sh                        一键编译
 ├── run_auto_bench.sh               用官方原版 auto_bench.py 评测
-├── check_compliance.py             合规自检（29 项，对照规则 4.2/4.3/5.1/5.2）
+├── check_compliance.py             合规自检（33 项，对照规则 4.2/4.3/5.1/5.2）
 ├── requirements.txt                环境依赖
 ├── CMakeLists.txt
 ├── op_kernel/

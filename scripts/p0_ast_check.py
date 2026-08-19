@@ -161,18 +161,21 @@ def main():
     if missing:
         problems.append("过滤后缺失符号: {}".format(missing))
 
-    # ---- 参考 Model 在 CPU 上应可直接跑 ----
-    try:
-        import torch
-        torch.manual_seed(0)
-        inputs = ns["get_inputs"]()
-        m = ns["Model"](*ns["get_init_inputs"]())
-        y = m(*inputs)
-        print("参考 Model 前向: OK, 输出 shape={}, dtype={}".format(
-            tuple(y.shape), y.dtype))
-    except Exception as e:                                # noqa: BLE001
-        print("参考 Model 前向失败: {}: {}".format(type(e).__name__, e))
-        problems.append("参考 Model 跑不起来")
+    # ---- 参考 Model 在 CPU 上应可直接跑（仅 v0 角色）----
+    if "Model" not in ns:
+        print("\n（本文件是 v1 提交件，按规范只需 ModelNew；参考实现在 model_ref.py）")
+    else:
+        try:
+            import torch
+            torch.manual_seed(0)
+            inputs = ns["get_inputs"]()
+            m = ns["Model"](*ns["get_init_inputs"]())
+            y = m(*inputs)
+            print("参考 Model 前向: OK, 输出 shape={}, dtype={}".format(
+                tuple(y.shape), y.dtype))
+        except Exception as e:                            # noqa: BLE001
+            print("参考 Model 前向失败: {}: {}".format(type(e).__name__, e))
+            problems.append("参考 Model 跑不起来")
 
     # ---- 缺 .so 时必须响亮报错，绝不能静默 fallback（规则 5.1）----
     if "ModelNew" not in ns:
@@ -186,8 +189,6 @@ def main():
     print("\n" + "-" * 72)
     print("反 fallback 检查：.so 不存在时 ModelNew() 必须抛异常")
     print("-" * 72)
-    saved = {k: os.environ.pop(k) for k in ("SINKHORN_OPS_SO", "SINKHORN_OPS_DIR")
-             if k in os.environ}
     try:
         ns["ModelNew"]()
         print("危险：没有 .so 也构造成功了 —— 存在静默 fallback 的风险")
@@ -198,8 +199,6 @@ def main():
     except Exception as e:                                # noqa: BLE001
         print("抛出了 {}（不是 RuntimeError，但至少没有静默 fallback）: {}".format(
             type(e).__name__, str(e).splitlines()[0]))
-    finally:
-        os.environ.update(saved)
 
     print("\n" + "=" * 72)
     if problems:

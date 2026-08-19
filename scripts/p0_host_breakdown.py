@@ -57,7 +57,7 @@ def main():
     ap.add_argument("--repeat", type=int, default=500)
     ap.add_argument("--repeat-torch", type=int, default=100,
                     help="参考实现算子多、较慢，用较少迭代（太少会与官方口径不可比）")
-    ap.add_argument("--module", default="submission/model_new.py",
+    ap.add_argument("--v1-file", dest="module", default="submission/model_new.py",
                     help="用于测量完整提交路径 M6")
     args = ap.parse_args()
 
