@@ -1,0 +1,4 @@
+/workspace/sinkhorn_claude/dist/【2026KernelSwift算子创新大赛】-test-Task03_sinkhorn-111/build/CMakeFiles/sinkhorn_normalize.dir
+/workspace/sinkhorn_claude/dist/【2026KernelSwift算子创新大赛】-test-Task03_sinkhorn-111/build/CMakeFiles/sinkhorn_normalize_ops.dir
+/workspace/sinkhorn_claude/dist/【2026KernelSwift算子创新大赛】-test-Task03_sinkhorn-111/build/CMakeFiles/edit_cache.dir
+/workspace/sinkhorn_claude/dist/【2026KernelSwift算子创新大赛】-test-Task03_sinkhorn-111/build/CMakeFiles/rebuild_cache.dir

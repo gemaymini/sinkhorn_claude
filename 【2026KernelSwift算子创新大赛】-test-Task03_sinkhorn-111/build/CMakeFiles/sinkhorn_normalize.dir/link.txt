@@ -1,0 +1,1 @@
+/usr/local/Ascend/cann-9.0.0/bin/bisheng CMakeFiles/sinkhorn_normalize.dir/op_host/sinkhorn_normalize.asc.o -o sinkhorn_normalize  -ltiling_api -lregister -lplatform -lunified_dlog -ldl -lm -lgraph_base 

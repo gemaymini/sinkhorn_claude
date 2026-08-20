@@ -1,0 +1,10 @@
+# 运行环境（与开发/验证环境一致）
+#   硬件   : 华为昇腾 Atlas A2 / 910B2  (dav-2201)
+#   CANN   : 9.0.0
+#   Python : 3.11
+#   编译器 : bisheng (随 CANN 提供), CMake >= 3.16, GCC 11
+#
+# Python 依赖（torch_npu 需与 CANN 版本匹配，请按昇腾官方指引安装）
+torch==2.10.0
+torch_npu==2.10.0
+numpy
