@@ -5,16 +5,16 @@
 compare_values，因此 PASS/FAIL 判定与官方的
 torch.allclose(atol=1e-2, rtol=1e-2, equal_nan=True) 一致。
 
-每个种子只执行精度 forward，不做 warmup/repeat 性能循环。默认测试 0~99
-共 100 个种子。逐种子结果立即追加到 JSONL，汇总结果定期原子更新到 JSON，
-支持通过 --resume 断点续跑。
+每个种子只执行精度 forward，不做 warmup/repeat 性能循环。种子从
+--start-seed 开始逐一递增，无上限地持续测试，直到用户按 Ctrl+C。
+逐种子结果立即追加到 JSONL，汇总结果定期原子更新到 JSON，
+支持通过 --resume 从下一个种子断点续跑。
 
 示例：
   python run_auto_bench_mulseed.py
-  python run_auto_bench_mulseed.py --seeds 0-999
-  python run_auto_bench_mulseed.py --seeds 0-99,2026 --fail-fast
+  python run_auto_bench_mulseed.py --start-seed 1000000
   python run_auto_bench_mulseed.py --auto-bench /path/to/auto_bench.py
-  python run_auto_bench_mulseed.py --seeds 0-999999 --quiet --resume
+  python run_auto_bench_mulseed.py --quiet --resume
 """
 
 from __future__ import annotations
@@ -26,11 +26,11 @@ import json
 import math
 import os
 import platform
-import re
 import sys
 import time
 import urllib.request
 from datetime import datetime
+from itertools import count
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterable
@@ -42,35 +42,9 @@ OFFICIAL_AUTO_BENCH_URL = (
     "https://raw.githubusercontent.com/DeepLink-org/DLBlas/"
     "main/benchmarks/ks/auto_bench.py"
 )
-DEFAULT_SEEDS = "0-99"
+DEFAULT_START_SEED = 0
 DEFAULT_ATOL = 1e-2
 DEFAULT_RTOL = 1e-2
-
-
-def parse_seed_spec(spec: str) -> list[int]:
-    """解析 ``0-99,2026`` 格式，去重后保留原顺序。"""
-    seeds: list[int] = []
-    seen: set[int] = set()
-    for raw_part in spec.split(","):
-        part = raw_part.strip()
-        if not part:
-            continue
-        match = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
-        if match is None:
-            raise argparse.ArgumentTypeError(
-                f"无效种子片段 {part!r}；请使用 42 或 0-99,2026 格式"
-            )
-        first = int(match.group(1))
-        last = int(match.group(2)) if match.group(2) is not None else first
-        if last < first:
-            raise argparse.ArgumentTypeError(f"种子范围必须递增: {part!r}")
-        for seed in range(first, last + 1):
-            if seed not in seen:
-                seen.add(seed)
-                seeds.append(seed)
-    if not seeds:
-        raise argparse.ArgumentTypeError("至少需要一个随机种子")
-    return seeds
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,10 +53,10 @@ def parse_args() -> argparse.Namespace:
         description="在 NPU 上按官方 auto_bench 口径做 SinkhornNormalize 多种子精度测试"
     )
     parser.add_argument(
-        "--seeds",
-        default=DEFAULT_SEEDS,
-        metavar="SPEC",
-        help=f"种子列表/范围，如 0-99,2026（默认 {DEFAULT_SEEDS}）",
+        "--start-seed",
+        type=int,
+        default=DEFAULT_START_SEED,
+        help=f"无限递增测试的起始种子（默认 {DEFAULT_START_SEED}）",
     )
     parser.add_argument("--atol", type=float, default=DEFAULT_ATOL)
     parser.add_argument("--rtol", type=float, default=DEFAULT_RTOL)
@@ -130,11 +104,8 @@ def parse_args() -> argparse.Namespace:
         help="不打印每个种子的明细，仅打印失败项和汇总",
     )
     args = parser.parse_args()
-    args.seed_spec = args.seeds
-    try:
-        args.seeds = parse_seed_spec(args.seed_spec)
-    except argparse.ArgumentTypeError as exc:
-        parser.error(str(exc))
+    if args.start_seed < 0:
+        parser.error("--start-seed 必须大于等于 0")
     if args.atol < 0 or args.rtol < 0:
         parser.error("--atol 和 --rtol 必须大于等于 0")
     if args.checkpoint_every <= 0:
@@ -458,14 +429,12 @@ def build_config(
     v0_path: Path,
     v1_path: Path,
 ) -> dict[str, Any]:
-    seeds: list[int] = args.seeds
     custom_op_path = v1_path.parent / "libsinkhorn_normalize_ops.so"
     return {
         "test_type": "real_npu_custom_operator_multiseed_accuracy",
-        "seed_spec": args.seed_spec,
-        "requested_seed_count": len(seeds),
-        "first_requested_seed": seeds[0],
-        "last_requested_seed": seeds[-1],
+        "run_mode": "until_keyboard_interrupt",
+        "start_seed": args.start_seed,
+        "requested_seed_count": None,
         "atol": args.atol,
         "rtol": args.rtol,
         "equal_nan": True,
@@ -513,9 +482,9 @@ def append_case_record(journal: Any, case: dict[str, Any]) -> None:
 
 def load_journal(
     path: Path, expected_config: dict[str, Any]
-) -> tuple[set[int], dict[str, Any]]:
+) -> tuple[int, dict[str, Any]]:
     """恢复 JSONL；若最后一行因意外中断不完整，安全截断该行。"""
-    tested_seeds: set[int] = set()
+    next_seed = int(expected_config["start_seed"])
     stats = new_stats()
     metadata_seen = False
     repaired = False
@@ -556,16 +525,18 @@ def load_journal(
             if record.get("record_type") != "case":
                 raise RuntimeError(f"JSONL 第 {line_number} 行类型无效: {path}")
             seed = int(record["seed"])
-            if seed in tested_seeds:
-                raise RuntimeError(f"JSONL 中存在重复 seed={seed}: {path}")
-            tested_seeds.add(seed)
+            if seed != next_seed:
+                raise RuntimeError(
+                    f"JSONL 种子序列不连续：期望 seed={next_seed}，实际 seed={seed}: {path}"
+                )
             update_stats(stats, record)
+            next_seed += 1
 
     if not metadata_seen:
         raise RuntimeError(f"JSONL 缺少 metadata: {path}")
     if repaired:
         print(f"已截断 JSONL 末尾的不完整记录: {path}")
-    return tested_seeds, stats
+    return next_seed, stats
 
 
 def build_summary(
@@ -577,12 +548,14 @@ def build_summary(
     details_path: Path,
     stop_reason: str = "",
 ) -> dict[str, Any]:
-    completed = stats["tested_seed_count"] == config["requested_seed_count"]
-    all_passed = completed and stats["failed_seed_count"] == 0
+    all_tested_passed = (
+        stats["tested_seed_count"] > 0 and stats["failed_seed_count"] == 0
+    )
     return {
         "schema_version": 2,
         "status": status,
-        "all_passed": all_passed,
+        "all_passed": all_tested_passed,
+        "next_seed": config["start_seed"] + stats["tested_seed_count"],
         "updated_at": now_iso(),
         "elapsed_seconds": elapsed_seconds,
         "stop_reason": stop_reason,
@@ -595,7 +568,6 @@ def build_summary(
 
 def main() -> int:
     args = parse_args()
-    seeds: list[int] = args.seeds
     started = time.perf_counter()
 
     bench_path = ensure_official_auto_bench(args.auto_bench, args.no_download)
@@ -625,10 +597,10 @@ def main() -> int:
 
     details_path.parent.mkdir(parents=True, exist_ok=True)
     if journal_resumed:
-        tested_seeds, stats = load_journal(details_path, config)
+        next_seed, stats = load_journal(details_path, config)
         journal = details_path.open("a", encoding="utf-8")
     else:
-        tested_seeds = set()
+        next_seed = args.start_seed
         stats = new_stats()
         journal = details_path.open("w", encoding="utf-8")
         write_journal_metadata(journal, config)
@@ -636,15 +608,18 @@ def main() -> int:
     print("=" * 78)
     print("SinkhornNormalize NPU 多随机种子精度测试")
     print("=" * 78)
-    print(f"种子       : {len(seeds)} 个 ({seeds[0]} ... {seeds[-1]})")
+    print(f"种子       : 从 {next_seed} 开始无限递增，按 Ctrl+C 停止")
     print(f"判定口径   : torch.allclose(atol={args.atol:g}, rtol={args.rtol:g}, equal_nan=True)")
     print(f"auto_bench : {bench_path}")
     print(f"v0         : {v0_path}")
     print(f"v1         : {v1_path}")
     print(f"汇总 JSON  : {output_path}")
     print(f"明细 JSONL : {details_path}")
-    if tested_seeds:
-        print(f"断点恢复   : 已有 {len(tested_seeds)} 个种子，将自动跳过")
+    if stats["tested_seed_count"]:
+        print(
+            f"断点恢复   : 已完成 {stats['tested_seed_count']} 个种子，"
+            f"从 seed={next_seed} 继续"
+        )
     print("-" * 78)
 
     initial_report = build_summary(
@@ -662,9 +637,7 @@ def main() -> int:
     stop_reason = ""
     new_case_count = 0
     try:
-        for seed in seeds:
-            if seed in tested_seeds:
-                continue
+        for seed in count(next_seed):
             runtime_error = False
             case_started = time.perf_counter()
             try:
@@ -701,7 +674,7 @@ def main() -> int:
             if not args.quiet or not case["passed"]:
                 case_status = "PASS" if case["passed"] else "FAIL"
                 print(
-                    f"[{tested_count:>{len(str(len(seeds)))}}/{len(seeds)}] "
+                    f"[已测 {tested_count}] "
                     f"seed={seed:<10} {case_status}  "
                     f"max_abs={case['max_abs_diff']:.3e}  "
                     f"tol_ratio={case['max_tolerance_ratio']:.3e}"
@@ -739,15 +712,12 @@ def main() -> int:
         journal.close()
 
     elapsed = previous_elapsed + time.perf_counter() - started
-    completed = stats["tested_seed_count"] == len(seeds)
     if interrupted:
         final_status = "interrupted"
     elif runtime_error:
         final_status = "error"
     elif stopped_by_fail_fast:
         final_status = "stopped"
-    elif completed:
-        final_status = "completed"
     else:
         final_status = "stopped"
     report = build_summary(
