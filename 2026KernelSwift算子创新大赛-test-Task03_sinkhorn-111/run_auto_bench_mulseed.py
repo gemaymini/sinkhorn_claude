@@ -6,18 +6,21 @@ compare_values，因此 PASS/FAIL 判定与官方的
 torch.allclose(atol=1e-2, rtol=1e-2, equal_nan=True) 一致。
 
 每个种子只执行精度 forward，不做 warmup/repeat 性能循环。默认测试 0~99
-共 100 个种子，并将逐种子误差、最大容差占用率写入 JSON 报告。
+共 100 个种子。逐种子结果立即追加到 JSONL，汇总结果定期原子更新到 JSON，
+支持通过 --resume 断点续跑。
 
 示例：
   python run_auto_bench_mulseed.py
   python run_auto_bench_mulseed.py --seeds 0-999
   python run_auto_bench_mulseed.py --seeds 0-99,2026 --fail-fast
   python run_auto_bench_mulseed.py --auto-bench /path/to/auto_bench.py
+  python run_auto_bench_mulseed.py --seeds 0-999999 --quiet --resume
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -27,6 +30,7 @@ import re
 import sys
 import time
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterable
@@ -76,8 +80,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--seeds",
-        type=parse_seed_spec,
-        default=parse_seed_spec(DEFAULT_SEEDS),
+        default=DEFAULT_SEEDS,
         metavar="SPEC",
         help=f"种子列表/范围，如 0-99,2026（默认 {DEFAULT_SEEDS}）",
     )
@@ -100,7 +103,25 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=here / "results" / "multiseed_accuracy.json",
-        help="JSON 报告路径",
+        help="汇总 JSON 报告路径",
+    )
+    parser.add_argument(
+        "--details-output",
+        type=Path,
+        default=None,
+        help="逐种子 JSONL 路径（默认为汇总文件名加 _cases.jsonl）",
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=100,
+        metavar="N",
+        help="每 N 个新种子刷新汇总 JSON 并 fsync（默认 100）",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="从已有 JSONL 明细中恢复，跳过已测种子",
     )
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument(
@@ -109,8 +130,19 @@ def parse_args() -> argparse.Namespace:
         help="不打印每个种子的明细，仅打印失败项和汇总",
     )
     args = parser.parse_args()
+    args.seed_spec = args.seeds
+    try:
+        args.seeds = parse_seed_spec(args.seed_spec)
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
     if args.atol < 0 or args.rtol < 0:
         parser.error("--atol 和 --rtol 必须大于等于 0")
+    if args.checkpoint_every <= 0:
+        parser.error("--checkpoint-every 必须大于 0")
+    if args.details_output is None:
+        args.details_output = args.output.with_name(
+            args.output.stem + "_cases.jsonl"
+        )
     return args
 
 
@@ -305,6 +337,262 @@ def json_safe(value: Any) -> Any:
     return value
 
 
+def now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def metric_value(value: Any) -> float:
+    """把 JSON 恢复后的 inf/-inf/nan 字符串还原为可比较数值。"""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if value == "inf":
+        return math.inf
+    if value == "-inf":
+        return -math.inf
+    if value == "nan":
+        return math.nan
+    raise ValueError(f"无效的数值指标: {value!r}")
+
+
+def new_stats() -> dict[str, Any]:
+    return {
+        "tested_seed_count": 0,
+        "passed_seed_count": 0,
+        "failed_seed_count": 0,
+        "runtime_error_count": 0,
+        "last_runtime_error": None,
+        "reference_nonfinite_count": 0,
+        "candidate_nonfinite_count": 0,
+        "both_nan_count": 0,
+        "total_case_seconds": 0.0,
+        "average_case_seconds": None,
+        "min_case_seconds": None,
+        "max_case_seconds": None,
+        "first_tested_seed": None,
+        "last_tested_seed": None,
+        "max_tolerance_ratio": None,
+        "worst_case_by_tolerance_ratio": None,
+        "max_abs_diff": None,
+        "worst_case_by_absolute_error": None,
+        "failed_seeds_preview": [],
+    }
+
+
+def update_stats(stats: dict[str, Any], case: dict[str, Any]) -> None:
+    case_snapshot = {
+        key: value
+        for key, value in case.items()
+        if key not in ("record_type", "recorded_at")
+    }
+    seed = int(case["seed"])
+    stats["tested_seed_count"] += 1
+    if case["passed"]:
+        stats["passed_seed_count"] += 1
+    else:
+        stats["failed_seed_count"] += 1
+        if len(stats["failed_seeds_preview"]) < 100:
+            stats["failed_seeds_preview"].append(seed)
+    stats["reference_nonfinite_count"] += int(case["reference_nonfinite_count"])
+    stats["candidate_nonfinite_count"] += int(case["candidate_nonfinite_count"])
+    stats["both_nan_count"] += int(case["both_nan_count"])
+    duration = metric_value(case["duration_seconds"])
+    stats["total_case_seconds"] += duration
+    stats["average_case_seconds"] = (
+        stats["total_case_seconds"] / stats["tested_seed_count"]
+    )
+    if stats["min_case_seconds"] is None or duration < stats["min_case_seconds"]:
+        stats["min_case_seconds"] = duration
+    if stats["max_case_seconds"] is None or duration > stats["max_case_seconds"]:
+        stats["max_case_seconds"] = duration
+    if stats["first_tested_seed"] is None:
+        stats["first_tested_seed"] = seed
+    stats["last_tested_seed"] = seed
+
+    tolerance_ratio = metric_value(case["max_tolerance_ratio"])
+    if (
+        stats["max_tolerance_ratio"] is None
+        or tolerance_ratio > stats["max_tolerance_ratio"]
+    ):
+        stats["max_tolerance_ratio"] = tolerance_ratio
+        stats["worst_case_by_tolerance_ratio"] = case_snapshot
+
+    max_abs_diff = metric_value(case["max_abs_diff"])
+    if stats["max_abs_diff"] is None or max_abs_diff > stats["max_abs_diff"]:
+        stats["max_abs_diff"] = max_abs_diff
+        stats["worst_case_by_absolute_error"] = case_snapshot
+
+
+def update_runtime_error_stats(stats: dict[str, Any], error: dict[str, Any]) -> None:
+    stats["runtime_error_count"] += 1
+    stats["last_runtime_error"] = {
+        key: value
+        for key, value in error.items()
+        if key not in ("record_type", "recorded_at")
+    }
+
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """同目录临时文件 + os.replace，避免汇总 JSON 被写一半。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(path.name + ".tmp")
+    temp_path.write_text(
+        json.dumps(json_safe(payload), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temp_path, path)
+
+
+def sha256_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_config(
+    args: argparse.Namespace,
+    bench_path: Path,
+    v0_path: Path,
+    v1_path: Path,
+) -> dict[str, Any]:
+    seeds: list[int] = args.seeds
+    custom_op_path = v1_path.parent / "libsinkhorn_normalize_ops.so"
+    return {
+        "test_type": "real_npu_custom_operator_multiseed_accuracy",
+        "seed_spec": args.seed_spec,
+        "requested_seed_count": len(seeds),
+        "first_requested_seed": seeds[0],
+        "last_requested_seed": seeds[-1],
+        "atol": args.atol,
+        "rtol": args.rtol,
+        "equal_nan": True,
+        "auto_bench_path": str(bench_path),
+        "auto_bench_url": OFFICIAL_AUTO_BENCH_URL,
+        "auto_bench_sha256": sha256_file(bench_path),
+        "v0_file": str(v0_path),
+        "v0_sha256": sha256_file(v0_path),
+        "v1_file": str(v1_path),
+        "v1_sha256": sha256_file(v1_path),
+        "custom_op_file": str(custom_op_path),
+        "custom_op_sha256": sha256_file(custom_op_path),
+        "ascend_home_path": os.environ.get("ASCEND_HOME_PATH"),
+        "torch_version": torch.__version__,
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+    }
+
+
+def write_journal_metadata(journal: Any, config: dict[str, Any]) -> None:
+    record = {
+        "record_type": "metadata",
+        "schema_version": 1,
+        "created_at": now_iso(),
+        "config": config,
+    }
+    journal.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    journal.flush()
+    os.fsync(journal.fileno())
+
+
+def append_case_record(journal: Any, case: dict[str, Any]) -> None:
+    record = {
+        "record_type": "runtime_error" if case.get("runtime_error") else "case",
+        "recorded_at": now_iso(),
+        **case,
+    }
+    journal.write(
+        json.dumps(json_safe(record), ensure_ascii=False, separators=(",", ":"))
+        + "\n"
+    )
+    # 每个种子都刷到操作系统；fsync 由 checkpoint 批量完成。
+    journal.flush()
+
+
+def load_journal(
+    path: Path, expected_config: dict[str, Any]
+) -> tuple[set[int], dict[str, Any]]:
+    """恢复 JSONL；若最后一行因意外中断不完整，安全截断该行。"""
+    tested_seeds: set[int] = set()
+    stats = new_stats()
+    metadata_seen = False
+    repaired = False
+
+    with path.open("rb+") as raw:
+        file_size = os.fstat(raw.fileno()).st_size
+        line_number = 0
+        while True:
+            line_start = raw.tell()
+            line = raw.readline()
+            if not line:
+                break
+            line_number += 1
+            try:
+                record = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                if raw.tell() == file_size:
+                    raw.truncate(line_start)
+                    repaired = True
+                    break
+                raise RuntimeError(
+                    f"JSONL 第 {line_number} 行损坏，无法恢复: {path}"
+                ) from exc
+
+            if record.get("record_type") == "metadata":
+                if metadata_seen or line_number != 1:
+                    raise RuntimeError(f"JSONL metadata 位置异常: {path}")
+                metadata_seen = True
+                if record.get("config") != expected_config:
+                    raise RuntimeError(
+                        "--resume 的参数/环境与已有 JSONL 不一致；"
+                        "请使用原参数，或去掉 --resume 开始新测试。"
+                    )
+                continue
+            if record.get("record_type") == "runtime_error":
+                update_runtime_error_stats(stats, record)
+                continue
+            if record.get("record_type") != "case":
+                raise RuntimeError(f"JSONL 第 {line_number} 行类型无效: {path}")
+            seed = int(record["seed"])
+            if seed in tested_seeds:
+                raise RuntimeError(f"JSONL 中存在重复 seed={seed}: {path}")
+            tested_seeds.add(seed)
+            update_stats(stats, record)
+
+    if not metadata_seen:
+        raise RuntimeError(f"JSONL 缺少 metadata: {path}")
+    if repaired:
+        print(f"已截断 JSONL 末尾的不完整记录: {path}")
+    return tested_seeds, stats
+
+
+def build_summary(
+    config: dict[str, Any],
+    stats: dict[str, Any],
+    *,
+    status: str,
+    elapsed_seconds: float,
+    details_path: Path,
+    stop_reason: str = "",
+) -> dict[str, Any]:
+    completed = stats["tested_seed_count"] == config["requested_seed_count"]
+    all_passed = completed and stats["failed_seed_count"] == 0
+    return {
+        "schema_version": 2,
+        "status": status,
+        "all_passed": all_passed,
+        "updated_at": now_iso(),
+        "elapsed_seconds": elapsed_seconds,
+        "stop_reason": stop_reason,
+        "details_file": str(details_path),
+        "details_format": "JSON Lines; first record is metadata, remaining records are per-seed cases or runtime errors",
+        "config": config,
+        "summary": stats,
+    }
+
+
 def main() -> int:
     args = parse_args()
     seeds: list[int] = args.seeds
@@ -318,6 +606,33 @@ def main() -> int:
         if not path.is_file():
             raise FileNotFoundError(f"{label} 文件不存在: {path}")
 
+    output_path = args.output.resolve()
+    details_path = args.details_output.resolve()
+    if output_path == details_path:
+        raise ValueError("--output 和 --details-output 不能是同一文件")
+    config = build_config(args, bench_path, v0_path, v1_path)
+
+    journal_resumed = (
+        args.resume and details_path.is_file() and details_path.stat().st_size > 0
+    )
+    previous_elapsed = 0.0
+    if journal_resumed and output_path.is_file():
+        try:
+            previous_summary = json.loads(output_path.read_text(encoding="utf-8"))
+            previous_elapsed = float(previous_summary.get("elapsed_seconds", 0.0))
+        except (OSError, ValueError, json.JSONDecodeError):
+            previous_elapsed = 0.0
+
+    details_path.parent.mkdir(parents=True, exist_ok=True)
+    if journal_resumed:
+        tested_seeds, stats = load_journal(details_path, config)
+        journal = details_path.open("a", encoding="utf-8")
+    else:
+        tested_seeds = set()
+        stats = new_stats()
+        journal = details_path.open("w", encoding="utf-8")
+        write_journal_metadata(journal, config)
+
     print("=" * 78)
     print("SinkhornNormalize NPU 多随机种子精度测试")
     print("=" * 78)
@@ -326,113 +641,149 @@ def main() -> int:
     print(f"auto_bench : {bench_path}")
     print(f"v0         : {v0_path}")
     print(f"v1         : {v1_path}")
+    print(f"汇总 JSON  : {output_path}")
+    print(f"明细 JSONL : {details_path}")
+    if tested_seeds:
+        print(f"断点恢复   : 已有 {len(tested_seeds)} 个种子，将自动跳过")
     print("-" * 78)
 
-    cases: list[dict[str, Any]] = []
-    for index, seed in enumerate(seeds, start=1):
-        runtime_error = False
-        try:
-            case = run_seed(bench, v0_path, v1_path, seed, args.atol, args.rtol)
-        except Exception as exc:  # noqa: BLE001 - 记录种子级运行失败
-            runtime_error = True
-            case = {
-                "seed": seed,
-                "passed": False,
-                "message": f"{type(exc).__name__}: {exc}",
-                "device": "npu",
-                "element_count": 0,
-                "mismatch_count": 0,
-                "reference_nonfinite_count": 0,
-                "candidate_nonfinite_count": 0,
-                "both_nan_count": 0,
-                "max_abs_diff": math.inf,
-                "mean_abs_diff": math.inf,
-                "max_tolerance_ratio": math.inf,
-                "worst_element": None,
-            }
-        cases.append(case)
-        if not args.quiet or not case["passed"]:
-            status = "PASS" if case["passed"] else "FAIL"
-            print(
-                f"[{index:>{len(str(len(seeds)))}}/{len(seeds)}] "
-                f"seed={seed:<10} {status}  "
-                f"max_abs={case['max_abs_diff']:.3e}  "
-                f"tol_ratio={case['max_tolerance_ratio']:.3e}"
-            )
-            if case["message"]:
-                print(f"  {case['message']}")
-        # 环境、加载或 forward 异常通常与种子无关，继续 100 次只会重复同一错误。
-        if runtime_error:
-            print("遇到运行异常，已停止后续种子测试。")
-            break
-        if args.fail_fast and not case["passed"]:
-            break
-
-    passed_cases = [case for case in cases if case["passed"]]
-    failed_cases = [case for case in cases if not case["passed"]]
-    worst_case = max(cases, key=lambda case: case["max_tolerance_ratio"])
-    max_abs_case = max(cases, key=lambda case: case["max_abs_diff"])
-    elapsed = time.perf_counter() - started
-    report = {
-        "schema_version": 1,
-        "test_type": "real_npu_custom_operator_multiseed_accuracy",
-        "all_passed": not failed_cases and len(cases) == len(seeds),
-        "requested_seed_count": len(seeds),
-        "tested_seed_count": len(cases),
-        "passed_seed_count": len(passed_cases),
-        "failed_seed_count": len(failed_cases),
-        "reference_nonfinite_count": sum(
-            case["reference_nonfinite_count"] for case in cases
-        ),
-        "candidate_nonfinite_count": sum(
-            case["candidate_nonfinite_count"] for case in cases
-        ),
-        "both_nan_count": sum(case["both_nan_count"] for case in cases),
-        "seeds": seeds,
-        "atol": args.atol,
-        "rtol": args.rtol,
-        "equal_nan": True,
-        "worst_seed_by_tolerance_ratio": worst_case["seed"],
-        "max_tolerance_ratio": worst_case["max_tolerance_ratio"],
-        "worst_seed_by_absolute_error": max_abs_case["seed"],
-        "max_abs_diff": max_abs_case["max_abs_diff"],
-        "elapsed_seconds": elapsed,
-        "auto_bench_path": str(bench_path),
-        "auto_bench_url": OFFICIAL_AUTO_BENCH_URL,
-        "v0_file": str(v0_path),
-        "v1_file": str(v1_path),
-        "torch_version": torch.__version__,
-        "python_version": platform.python_version(),
-        "platform": platform.platform(),
-        "cases": cases,
-    }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(json_safe(report), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    initial_report = build_summary(
+        config,
+        stats,
+        status="running",
+        elapsed_seconds=previous_elapsed,
+        details_path=details_path,
     )
+    atomic_write_json(output_path, initial_report)
+
+    runtime_error = False
+    interrupted = False
+    stopped_by_fail_fast = False
+    stop_reason = ""
+    new_case_count = 0
+    try:
+        for seed in seeds:
+            if seed in tested_seeds:
+                continue
+            runtime_error = False
+            case_started = time.perf_counter()
+            try:
+                case = run_seed(bench, v0_path, v1_path, seed, args.atol, args.rtol)
+                case["runtime_error"] = False
+            except Exception as exc:  # noqa: BLE001 - 记录后停止无意义重试
+                runtime_error = True
+                case = {
+                    "seed": seed,
+                    "passed": False,
+                    "runtime_error": True,
+                    "message": f"{type(exc).__name__}: {exc}",
+                    "device": "npu",
+                    "element_count": 0,
+                    "mismatch_count": 0,
+                    "reference_nonfinite_count": 0,
+                    "candidate_nonfinite_count": 0,
+                    "both_nan_count": 0,
+                    "max_abs_diff": math.inf,
+                    "mean_abs_diff": math.inf,
+                    "max_tolerance_ratio": math.inf,
+                    "worst_element": None,
+                }
+            case["duration_seconds"] = time.perf_counter() - case_started
+
+            append_case_record(journal, case)
+            if runtime_error:
+                update_runtime_error_stats(stats, case)
+            else:
+                update_stats(stats, case)
+            new_case_count += 1
+
+            tested_count = stats["tested_seed_count"]
+            if not args.quiet or not case["passed"]:
+                case_status = "PASS" if case["passed"] else "FAIL"
+                print(
+                    f"[{tested_count:>{len(str(len(seeds)))}}/{len(seeds)}] "
+                    f"seed={seed:<10} {case_status}  "
+                    f"max_abs={case['max_abs_diff']:.3e}  "
+                    f"tol_ratio={case['max_tolerance_ratio']:.3e}"
+                )
+                if case["message"]:
+                    print(f"  {case['message']}")
+
+            if new_case_count % args.checkpoint_every == 0:
+                os.fsync(journal.fileno())
+                elapsed = previous_elapsed + time.perf_counter() - started
+                checkpoint = build_summary(
+                    config,
+                    stats,
+                    status="running",
+                    elapsed_seconds=elapsed,
+                    details_path=details_path,
+                )
+                atomic_write_json(output_path, checkpoint)
+
+            if runtime_error:
+                stop_reason = case["message"]
+                print("遇到运行异常，已停止后续种子测试。")
+                break
+            if args.fail_fast and not case["passed"]:
+                stopped_by_fail_fast = True
+                stop_reason = f"--fail-fast: seed={seed} 精度失败"
+                break
+    except KeyboardInterrupt:
+        interrupted = True
+        stop_reason = "用户中断"
+        print("\n用户中断，正在保存检查点……", file=sys.stderr)
+    finally:
+        journal.flush()
+        os.fsync(journal.fileno())
+        journal.close()
+
+    elapsed = previous_elapsed + time.perf_counter() - started
+    completed = stats["tested_seed_count"] == len(seeds)
+    if interrupted:
+        final_status = "interrupted"
+    elif runtime_error:
+        final_status = "error"
+    elif stopped_by_fail_fast:
+        final_status = "stopped"
+    elif completed:
+        final_status = "completed"
+    else:
+        final_status = "stopped"
+    report = build_summary(
+        config,
+        stats,
+        status=final_status,
+        elapsed_seconds=elapsed,
+        details_path=details_path,
+        stop_reason=stop_reason,
+    )
+    atomic_write_json(output_path, report)
 
     print("-" * 78)
     print(
         f"汇总       : {'PASS' if report['all_passed'] else 'FAIL'}  "
-        f"{len(passed_cases)}/{len(cases)} 个已测种子通过"
+        f"{stats['passed_seed_count']}/{stats['tested_seed_count']} 个已测种子通过"
     )
-    print(
-        f"最大绝对误差: {max_abs_case['max_abs_diff']:.6e} "
-        f"(seed={max_abs_case['seed']})"
-    )
-    print(
-        f"最大容差占用: {worst_case['max_tolerance_ratio']:.6e} "
-        f"(seed={worst_case['seed']}; < 1 才通过)"
-    )
+    max_abs_case = stats["worst_case_by_absolute_error"]
+    worst_ratio_case = stats["worst_case_by_tolerance_ratio"]
+    if max_abs_case is not None:
+        print(
+            f"最大绝对误差: {metric_value(max_abs_case['max_abs_diff']):.6e} "
+            f"(seed={max_abs_case['seed']})"
+        )
+    if worst_ratio_case is not None:
+        print(
+            f"最大容差占用: {metric_value(worst_ratio_case['max_tolerance_ratio']):.6e} "
+            f"(seed={worst_ratio_case['seed']}; < 1 才通过)"
+        )
     print(f"耗时       : {elapsed:.3f} s")
-    print(f"报告       : {args.output.resolve()}")
+    print(f"汇总 JSON  : {output_path}")
+    print(f"明细 JSONL : {details_path}")
+    if interrupted:
+        return 130
     return 0 if report["all_passed"] else 1
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except KeyboardInterrupt:
-        print("\n用户中断。", file=sys.stderr)
-        raise SystemExit(130)
+    raise SystemExit(main())
