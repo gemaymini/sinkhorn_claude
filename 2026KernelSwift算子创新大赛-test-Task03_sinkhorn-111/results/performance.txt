@@ -1,0 +1,39 @@
+SinkhornNormalize 性能测试结果
+==============================================================
+
+由 run_auto_bench.sh 调用**官方原版** auto_bench.py 生成，非人工填写。
+
+测试时间   : 2026-08-20 09:48:20
+硬件       : 华为昇腾 Atlas A2 / 910B2 (dav-2201)
+CANN       : /usr/local/Ascend/cann-9.0.0
+Python     : 3.11.15
+torch      : 2.10.0+cpu
+torch_npu  : 2.10.0
+评测脚本   : /tmp/auto_bench.py
+
+评测协议（官方 auto_bench.py 默认值）
+--------------------------------------------------------------
+  warmup = 200,  repeat = 500,  取 median
+  每次迭代 time.perf_counter() 包住整个 forward() 后 sync_devices()
+  正确性 torch.allclose(atol=1e-2, rtol=1e-2, equal_nan=True)
+  v0 = model_ref.py 的 Model      （赛题参考实现）
+  v1 = model_new.py 的 ModelNew   （本提交）
+
+结果
+--------------------------------------------------------------
+  正确性     : PASS
+  v0 参考实现 :   1252.750 us
+  v1 本提交   :    144.385 us
+  加速比      :      8.676x
+
+复现方式
+--------------------------------------------------------------
+  bash build.sh            # 编译（不需要任何 -D 选项）
+  bash run_auto_bench.sh   # 用官方 auto_bench.py 评测并刷新本文件
+
+auto_bench.py 原始输出
+--------------------------------------------------------------
+  [W820 09:47:59.047210560 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+  PASS accuracy; v0=1.252750 ms, v1=0.144385 ms, speedup=8.676x
+  
+  Summary: 1 passed, 0 failed, 1 total.
