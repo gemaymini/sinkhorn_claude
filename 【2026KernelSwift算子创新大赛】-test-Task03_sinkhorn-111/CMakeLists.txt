@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 #
 # SinkhornNormalize 提交版构建脚本。
-# 算子配置已写死为实测最优，**不需要任何 -D 选项**：
+# 算子配置与问题规模均已写死，**不需要任何 -D 选项**：
 #   cmake -S . -B build && cmake --build build --target sinkhorn_normalize_ops
 # ===========================================================================================================
 
@@ -18,26 +18,7 @@ set(ACL_INCLUDE_DIR "$ENV{ASCEND_HOME_PATH}/aarch64-linux/include")
 set(ACL_LIB_DIR "$ENV{ASCEND_HOME_PATH}/lib64")
 
 # ============================================================================
-# Target 1: 直调可执行文件（不依赖 torch，便于单独验证 kernel）
-# ============================================================================
-
-add_executable(sinkhorn_normalize op_host/sinkhorn_normalize.asc)
-
-target_link_libraries(sinkhorn_normalize PRIVATE
-    tiling_api register platform unified_dlog dl m graph_base
-)
-
-target_include_directories(sinkhorn_normalize PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel
-    ${CMAKE_CURRENT_SOURCE_DIR}/op_host
-)
-
-target_compile_options(sinkhorn_normalize PRIVATE
-    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-2201>
-)
-
-# ============================================================================
-# Target 2: TORCH_LIBRARY 模块 libsinkhorn_normalize_ops.so —— 提交件实际使用的产物
+# libsinkhorn_normalize_ops.so —— 评测唯一使用的产物
 # ============================================================================
 
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)

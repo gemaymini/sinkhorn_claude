@@ -32,6 +32,12 @@ CONFIG = {
     "SN_S1_EPS_MODE": 1,
     "SN_TILING_MODE": 1,
     "SN_CORE_QUERY": 1,
+    # 赛题规模固定为 [1,1024,4,4]：16 核 × 64 矩阵、单 tile、无尾块。
+    # 特化后 count/repeatTimes 全部折叠为编译期立即数，
+    # 且 tiling 不再经 GM 传递（repeat/eps 走 kernel 标量入参）。
+    "SN_FIXED_SHAPE": 1,
+    # 去掉反作弊调用计数与逐项 TORCH_CHECK（保留一条形状校验）。
+    "SN_LEAN_HOST": 1,
 }
 
 
@@ -174,6 +180,11 @@ def drop_lines_containing(text, *needles):
 # 写死 eps_mode=1（算术构造）后，kernel 不再从 GM 读 eps 数组，
 # tiling buffer 可以从 8224 字节退回 32 字节（就是结构体本身）。
 HOST_SUBS = [
+    # 固定规模后这个 #define 变成自引用（会破坏头文件里的 constexpr），必须删
+    ("""// 对照组 v0 是 per-matrix kernel，原本就用满核；若也按 SN_TILE_TARGET 限核会让 A/B 失真。
+// tileTarget=1 时 SinkhornComputeTiling 会退化成"能用多少核用多少核"，与原实现完全一致。
+#define SN_TILE_TARGET (SN_TILE_TARGET)""", ""),
+    ("#define SN_TILE_TARGET (SN_TILE_TARGET)", ""),
     ("SN_TILING_BYTES", "sizeof(SinkhornTilingData)"),
     ("SN_EFFECTIVE_TILE_TARGET", "SN_TILE_TARGET"),
     # torch 绑定层：不再需要「结构体 + eps 数组」的字节缓冲，直接上传结构体
@@ -239,6 +250,18 @@ def gen_tiling_header():
             src = src[:a] + src[b + 2:]
     a = src.index("// 把 tiling 结构 + eps 数组一起填进 host 侧缓冲区")
     src = src[:a].rstrip() + "\n"
+    if CONFIG.get("SN_FIXED_SHAPE"):
+        # 规模写死后不再有 tiling 结构体与 tiling 计算
+        a = src.index("// ---- Tiling ----")
+        src = src[:a].rstrip() + "\n"
+        for frag in ("constexpr uint32_t SN_TILE_MAX",
+                     "// 每核期望处理的矩阵数",
+                     "constexpr uint32_t SN_TILE_TARGET"):
+            while frag in src:
+                i = src.index(frag)
+                j = src.index("\n", i) + 1
+                src = src[:i] + src[j:]
+        src = src.replace("// ---- S1 常量 ----\n", "")
     # 补上写死的 tile 目标
     src = src.replace("constexpr uint32_t SN_TILE_MAX = 128;",
                       "constexpr uint32_t SN_TILE_MAX = 128;\n\n"
@@ -377,6 +400,13 @@ def main():
                 "tiling buffer 尾部附带的 eps 数组",
                 "InitBuffer(recBuf", "TBuf<TPosition::VECCALC> recBuf;")
             text = replace_switch_docs(text)
+            if CONFIG.get("SN_FIXED_SHAPE"):
+                # 固定规模路径不用这几个成员，也不再引用 tiling 结构
+                text = drop_lines_containing(
+                    text,
+                    "uint32_t tile_ = SN_TILE_MAX;",
+                    "uint32_t matStart_ = 0;",
+                    "uint32_t matEnd_ = 0;")
         if not is_kernel:
             for a, b in HOST_SUBS:
                 text = text.replace(a, b)

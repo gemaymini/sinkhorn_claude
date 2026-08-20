@@ -40,7 +40,4 @@ cmake --build build --target sinkhorn_normalize_ops -j4 || { echo "编译失败"
 cp -f build/libsinkhorn_normalize_ops.so ./ 2>/dev/null || true
 echo
 echo "完成: ${HERE}/libsinkhorn_normalize_ops.so"
-echo "验证:  ${PY} scripts/check_shapes.py --so ${HERE}/libsinkhorn_normalize_ops.so"
-echo "评测:  ${PY} scripts/bench_official.py --v0-file model_ref.py \\"
-echo "           --v1-file model_new.py --device npu --mode official"
-echo "官方:  bash run_auto_bench.sh"
+echo "评测:  bash run_auto_bench.sh    # 用官方 auto_bench.py（含正确性校验）"

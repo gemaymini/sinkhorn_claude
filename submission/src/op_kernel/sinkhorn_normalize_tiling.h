@@ -16,14 +16,8 @@ constexpr uint32_t SN_PAD_MAT = 32;         // UB 中每矩阵 32 个 float（4 
 constexpr uint32_t SN_REPEAT = 10;
 constexpr float SN_EPS = 1e-6f;
 
-// ---- S1 常量 ----
 // 单个 tile 最多处理多少矩阵。上限来自 AscendC level-0 API 的 repeatTimes 是 uint8 (<=255)，
 // ColNormalize 里的 Add/Mul 用 repeatTimes = matsPerTile。
-constexpr uint32_t SN_TILE_MAX = 128;
-
-// 每核期望处理的矩阵数。实测 <64 明显更慢（block 启动成本主导），
-// 64 与 128 基本持平，取 64。
-constexpr uint32_t SN_TILE_TARGET = 64;
 
 // ColNormalize 中避免 1/0 的极小量。列和量级 ~0.25~1，加 1e-30 在 fp32 下完全不影响有效位；
 // 而填充列的和恒为 0，加完之后取倒数得到有限的 1e30，乘上恒为 0 的填充值仍是 0。
@@ -32,53 +26,3 @@ constexpr float SN_TINY = 1e-30f;
 // CopyIn 的填充值。exp(-1000) 在 fp32 下下溢为**精确的 0**，
 // 这样填充位在整个 10 次迭代中恒为 0，不需要任何掩码缓冲区。
 constexpr float SN_PAD_FILL = -1000.0f;
-
-// ---- Tiling ----
-struct SinkhornTilingData {
-    uint32_t blockNum;        // 实际使用的核数
-    uint32_t totalMats;       // 矩阵总数
-    uint32_t matPerCore;      // 每核矩阵数（末核可能不足）
-    uint32_t tailMatLastCore; // 末核的矩阵数
-    uint32_t repeat;          // Sinkhorn 迭代次数
-    float eps;                // epsilon
-    uint32_t matsPerTile;     // S1: 单 tile 的矩阵数（<= SN_TILE_MAX）
-    uint32_t reserved;        // 保持 32 字节大小
-};
-
-// ---- host/kernel 共用的 tiling 计算（纯 C++，无 ASC 关键字）----
-// tileTarget: 期望每个核处理多少矩阵。小 shape 下打满核心不一定更快
-// （向量指令的 repeat 数是一样的），所以核数按 tileTarget 反推而不是无脑用满。
-inline void SinkhornComputeTiling(SinkhornTilingData &t, uint32_t totalMats,
-                                  uint32_t repeat, float eps,
-                                  uint32_t availableCores, uint32_t tileTarget)
-{
-    if (tileTarget == 0 || tileTarget > SN_TILE_MAX) {
-        tileTarget = SN_TILE_MAX;
-    }
-    uint32_t wanted = (totalMats + tileTarget - 1) / tileTarget;
-    if (wanted == 0) {
-        wanted = 1;
-    }
-    uint32_t cores = availableCores == 0 ? 1 : availableCores;
-    if (cores > wanted) {
-        cores = wanted;
-    }
-    if (cores > totalMats) {
-        cores = totalMats;
-    }
-    if (cores == 0) {
-        cores = 1;
-    }
-
-    const uint32_t matPerCore = (totalMats + cores - 1) / cores;
-    const uint32_t blockNum = (totalMats + matPerCore - 1) / matPerCore;
-
-    t.blockNum = blockNum;
-    t.totalMats = totalMats;
-    t.matPerCore = matPerCore;
-    t.tailMatLastCore = totalMats - matPerCore * (blockNum - 1);
-    t.repeat = repeat;
-    t.eps = eps;
-    t.matsPerTile = matPerCore < SN_TILE_MAX ? matPerCore : SN_TILE_MAX;
-    t.reserved = 0;
-}

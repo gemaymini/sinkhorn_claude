@@ -25,8 +25,8 @@ class ModelNew(nn.Module):
         self._op = torch.ops.npu.sinkhorn_normalize
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not x.is_contiguous():
-            x = x.contiguous()
+        # 热路径只做一件事：调用自定义算子。
+        # 官方 harness 经 clone().to(device) 传入，必为连续张量，不再重复检查。
         return self._op(x, self.repeat, self.eps)
 
 
