@@ -1,18 +1,3 @@
-#!/bin/bash
-# =============================================================================
-# 用**官方原版** auto_bench.py 评测本提交件，并把结果写入 results/performance.txt
-#
-# 所有评测参数的默认值与官方 auto_bench.py 的 argparse 默认值**逐项一致**，
-# 因此不带任何参数运行 = 官方口径；也可以按需覆盖任意一项做自定义实验。
-#
-# 用法:
-#   bash run_auto_bench.sh                              # 全默认（官方口径）
-#   bash run_auto_bench.sh --seed 7                     # 换随机种子
-#   bash run_auto_bench.sh --warmup 50 --repeat 100     # 快速跑一遍
-#   bash run_auto_bench.sh --atol 1e-3 --rtol 1e-3      # 收紧精度判据
-#   bash run_auto_bench.sh --auto-bench /path/to/auto_bench.py   # 指定官方脚本路径
-#   bash run_auto_bench.sh --help
-# =============================================================================
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${HERE}"
@@ -74,6 +59,7 @@ usage() {
   * 任何非默认参数都会在结果文件中被标注出来，避免与官方口径混淆。
 USAGE
 }
+# ./run_auto_bench.sh --seed 43 --atol 1e-3 --rtol 1e-3  --fail-fast --full-traceback 
 
 # ---------------------------------------------------------------- 参数解析
 # 先把 "--opt=value" 拆成 "--opt" "value" 两个 token，后面就只需处理一种形式
